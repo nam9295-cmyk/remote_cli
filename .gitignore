@@ -5,3 +5,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .DS_Store
+data/*.db
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal

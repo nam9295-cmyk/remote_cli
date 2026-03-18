@@ -13,12 +13,14 @@ export interface Job {
   id: string;
   title: string;
   engine: EngineId;
+  prompt: string;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
-  resultSummary: string;
-  prompt: string;
-  workdir: string;
-  tags: string[];
-  logExcerpt: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  resultSummary: string | null;
+  previewImagePath: string | null;
+  logPath: string | null;
+  errorMessage: string | null;
 }

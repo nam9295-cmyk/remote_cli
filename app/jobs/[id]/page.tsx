@@ -1,12 +1,15 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { StatusBadge } from "@/components/status-badge";
-import { ENGINES, getJobById } from "@/lib/data";
+import { ENGINES } from "@/lib/data";
+import { getJobById } from "@/lib/jobs";
 import { formatDate } from "@/lib/utils";
 
 type JobDetailPageProps = {
   params: Promise<{ id: string }>;
 };
+
+export const dynamic = "force-dynamic";
 
 export default async function JobDetailPage({
   params,
@@ -41,7 +44,7 @@ export default async function JobDetailPage({
                 {job.title}
               </h1>
               <p className="max-w-3xl text-sm leading-6 text-[color:var(--muted)]">
-                {job.resultSummary}
+                {job.resultSummary ?? "아직 결과 요약이 없습니다."}
               </p>
             </div>
           </div>
@@ -62,14 +65,23 @@ export default async function JobDetailPage({
 
           <div className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--surface)] p-5 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--accent)]">
-              Runner Log Preview
+              Result Summary
             </p>
-            <div className="mt-4 rounded-2xl bg-[color:var(--ink-strong)] px-4 py-4 font-mono text-sm leading-7 text-slate-100">
-              {job.logExcerpt.map((line) => (
-                <p key={line}>{line}</p>
-              ))}
-            </div>
+            <p className="mt-4 text-sm leading-7 text-[color:var(--ink)]">
+              {job.resultSummary ?? "아직 결과 요약이 없습니다."}
+            </p>
           </div>
+
+          {job.errorMessage ? (
+            <div className="rounded-[28px] border border-rose-200 bg-rose-50 p-5 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-rose-700">
+                Error Message
+              </p>
+              <p className="mt-4 text-sm leading-7 text-rose-900">
+                {job.errorMessage}
+              </p>
+            </div>
+          ) : null}
         </section>
 
         <aside className="space-y-6">
@@ -104,10 +116,18 @@ export default async function JobDetailPage({
               </div>
               <div className="rounded-2xl bg-[color:var(--surface-strong)] px-4 py-3">
                 <dt className="text-xs uppercase tracking-[0.18em] text-[color:var(--muted-soft)]">
-                  Workdir
+                  Started
                 </dt>
-                <dd className="mt-1 break-all font-medium text-[color:var(--ink-strong)]">
-                  {job.workdir}
+                <dd className="mt-1 font-medium text-[color:var(--ink-strong)]">
+                  {formatDate(job.startedAt)}
+                </dd>
+              </div>
+              <div className="rounded-2xl bg-[color:var(--surface-strong)] px-4 py-3">
+                <dt className="text-xs uppercase tracking-[0.18em] text-[color:var(--muted-soft)]">
+                  Finished
+                </dt>
+                <dd className="mt-1 font-medium text-[color:var(--ink-strong)]">
+                  {formatDate(job.finishedAt)}
                 </dd>
               </div>
             </dl>
@@ -115,18 +135,26 @@ export default async function JobDetailPage({
 
           <div className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--surface)] p-5 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--accent)]">
-              Tags
+              Stored Paths
             </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {job.tags.map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded-full bg-[color:var(--surface-strong)] px-3 py-1 text-xs font-semibold text-[color:var(--muted)]"
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
+            <dl className="mt-4 space-y-4 text-sm">
+              <div className="rounded-2xl bg-[color:var(--surface-strong)] px-4 py-3">
+                <dt className="text-xs uppercase tracking-[0.18em] text-[color:var(--muted-soft)]">
+                  Log Path
+                </dt>
+                <dd className="mt-1 break-all font-medium text-[color:var(--ink-strong)]">
+                  {job.logPath ?? "-"}
+                </dd>
+              </div>
+              <div className="rounded-2xl bg-[color:var(--surface-strong)] px-4 py-3">
+                <dt className="text-xs uppercase tracking-[0.18em] text-[color:var(--muted-soft)]">
+                  Preview Image
+                </dt>
+                <dd className="mt-1 break-all font-medium text-[color:var(--ink-strong)]">
+                  {job.previewImagePath ?? "-"}
+                </dd>
+              </div>
+            </dl>
           </div>
 
           <div className="rounded-[28px] border border-dashed border-[color:var(--line)] bg-[color:var(--surface)] p-5 shadow-sm">
@@ -134,8 +162,8 @@ export default async function JobDetailPage({
               Next Phase Note
             </p>
             <p className="mt-3 text-sm leading-6 text-[color:var(--muted)]">
-              Task 02에서 실제 DB 저장, Task 03에서 실행 버튼과 로그 스트리밍,
-              Task 04에서 텔레그램 전송 이력이 이 카드에 연결됩니다.
+              이제 이 화면은 SQLite에 저장된 실제 데이터를 보여줍니다. 다음 단계에서는
+              실행 버튼, 로그 파일, 상태 갱신을 여기에 이어 붙이면 됩니다.
             </p>
           </div>
         </aside>

@@ -2,7 +2,11 @@ export function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-export function formatDate(value: string) {
+export function formatDate(value: string | null | undefined) {
+  if (!value) {
+    return "-";
+  }
+
   return new Intl.DateTimeFormat("ko-KR", {
     year: "numeric",
     month: "short",

@@ -1,8 +1,11 @@
 import Link from "next/link";
+import { EmptyState } from "@/components/empty-state";
 import { JobCard } from "@/components/job-card";
 import { SectionHeader } from "@/components/section-header";
 import { StatCard } from "@/components/stat-card";
-import { getRecentJobs, getStatusCount } from "@/lib/data";
+import { getRecentJobs, getStatusCount } from "@/lib/jobs";
+
+export const dynamic = "force-dynamic";
 
 export default function HomePage() {
   const recentJobs = getRecentJobs(3);
@@ -76,11 +79,26 @@ export default function HomePage() {
             </Link>
           }
         />
-        <div className="grid gap-4 lg:grid-cols-3">
-          {recentJobs.map((job) => (
-            <JobCard key={job.id} job={job} />
-          ))}
-        </div>
+        {recentJobs.length > 0 ? (
+          <div className="grid gap-4 lg:grid-cols-3">
+            {recentJobs.map((job) => (
+              <JobCard key={job.id} job={job} />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="아직 저장된 작업이 없습니다"
+            description="새 작업을 만들면 이 영역과 작업 목록 페이지에 바로 반영됩니다."
+            action={
+              <Link
+                href="/new"
+                className="inline-flex items-center rounded-full bg-[color:var(--accent)] px-4 py-2 text-sm font-semibold text-white"
+              >
+                첫 작업 만들기
+              </Link>
+            }
+          />
+        )}
       </section>
     </div>
   );

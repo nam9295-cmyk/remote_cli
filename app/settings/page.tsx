@@ -1,7 +1,10 @@
 import { SectionHeader } from "@/components/section-header";
 import { ENGINES } from "@/lib/data";
+import { getDatabasePath } from "@/lib/db";
 
 export default function SettingsPage() {
+  const databasePath = getDatabasePath();
+
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -51,10 +54,10 @@ export default function SettingsPage() {
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <label className="space-y-2">
                 <span className="text-sm font-semibold text-[color:var(--ink-strong)]">
-                  작업 저장 경로
+                  작업 DB 경로
                 </span>
                 <input
-                  defaultValue="/Users/nam9295/Desktop/john_2.0/data/jobs"
+                  defaultValue={databasePath}
                   className="w-full rounded-2xl border border-[color:var(--line)] bg-white px-4 py-3 text-sm outline-none"
                 />
               </label>

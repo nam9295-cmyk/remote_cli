@@ -27,22 +27,11 @@ export function JobCard({ job }: JobCardProps) {
                 {job.title}
               </h3>
               <p className="mt-1 text-sm leading-6 text-[color:var(--muted)]">
-                {job.resultSummary}
+                {job.resultSummary ?? "아직 결과 요약이 없습니다."}
               </p>
             </div>
           </div>
           <StatusBadge status={job.status} />
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          {job.tags.map((tag) => (
-            <span
-              key={tag}
-              className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-[color:var(--muted)] ring-1 ring-[color:var(--line)]"
-            >
-              {tag}
-            </span>
-          ))}
         </div>
 
         <div className="grid gap-3 text-sm text-[color:var(--muted)] sm:grid-cols-2">
