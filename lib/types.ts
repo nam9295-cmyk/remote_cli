@@ -1,4 +1,6 @@
 export type JobStatus = "queued" | "running" | "success" | "failed";
+export type NotificationChannelType = "telegram";
+export type NotificationStatus = "sent" | "failed";
 
 export type EngineId = "gemini" | "codex" | "custom";
 
@@ -22,5 +24,15 @@ export interface Job {
   resultSummary: string | null;
   previewImagePath: string | null;
   logPath: string | null;
+  errorMessage: string | null;
+}
+
+export interface NotificationLog {
+  id: string;
+  jobId: string;
+  channelType: NotificationChannelType;
+  sentAt: string;
+  status: NotificationStatus;
+  messageId: string | null;
   errorMessage: string | null;
 }

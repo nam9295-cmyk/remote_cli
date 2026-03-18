@@ -110,6 +110,11 @@ export default function SettingsPage() {
                 />
               </label>
             </div>
+            <div className="mt-5 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-4 text-sm leading-6 text-[color:var(--muted)]">
+              작업이 `success` 또는 `failed`로 끝나면 텔레그램 메시지를 자동으로
+              전송합니다. 토큰이나 채팅방 정보가 없으면 전송 실패 이력이 상세 화면에
+              기록됩니다.
+            </div>
           </div>
 
           <div className="rounded-[32px] border border-dashed border-[color:var(--line)] bg-[color:var(--surface)] p-6 shadow-sm">

@@ -3,6 +3,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 
@@ -46,7 +47,19 @@ function getEngineConfig(engineId) {
 }
 
 function openDb() {
-  return new DatabaseSync(databasePath);
+  const db = new DatabaseSync(databasePath);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notification_logs (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      channel_type TEXT NOT NULL CHECK (channel_type IN ('telegram')),
+      sent_at TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+      message_id TEXT,
+      error_message TEXT
+    );
+  `);
+  return db;
 }
 
 function getJob(db) {
@@ -87,6 +100,134 @@ function appendLine(stream, line) {
   stream.write(`${line}\n`);
 }
 
+function mapJob(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    engine: row.engine,
+    prompt: row.prompt,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    resultSummary: row.result_summary,
+    previewImagePath: row.preview_image_path,
+    logPath: row.log_path,
+    errorMessage: row.error_message,
+  };
+}
+
+function insertNotificationLog(db, input) {
+  db.prepare(`
+    INSERT INTO notification_logs (
+      id,
+      job_id,
+      channel_type,
+      sent_at,
+      status,
+      message_id,
+      error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    `notif_${crypto.randomUUID()}`,
+    input.jobId,
+    "telegram",
+    input.sentAt,
+    input.status,
+    input.messageId || null,
+    input.errorMessage || null,
+  );
+}
+
+function buildJobDetailUrl(jobIdValue) {
+  const baseUrl = process.env.PUBLIC_BASE_URL && process.env.PUBLIC_BASE_URL.trim();
+
+  if (!baseUrl) {
+    return null;
+  }
+
+  return `${baseUrl.replace(/\/$/, "")}/jobs/${jobIdValue}`;
+}
+
+function buildTelegramText(job) {
+  const lines = [
+    job.status === "success" ? "[Remote CLI] 작업 완료" : "[Remote CLI] 작업 실패",
+    `제목: ${job.title}`,
+    `엔진: ${job.engine}`,
+    `상태: ${job.status}`,
+  ];
+
+  if (job.status === "success" && job.resultSummary) {
+    lines.push(`요약: ${job.resultSummary}`);
+  }
+
+  if (job.status === "failed" && job.errorMessage) {
+    lines.push(`에러: ${job.errorMessage}`);
+  }
+
+  const detailUrl = buildJobDetailUrl(job.id);
+
+  if (detailUrl) {
+    lines.push(`상세: ${detailUrl}`);
+  }
+
+  return lines.join("\n");
+}
+
+async function sendTelegramNotification(job) {
+  const token = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim();
+  const chatId = process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
+  const sentAt = new Date().toISOString();
+
+  if (!token || !chatId) {
+    return {
+      sentAt,
+      status: "failed",
+      errorMessage:
+        "TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 환경변수가 설정되지 않았습니다.",
+    };
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: buildTelegramText(job),
+        disable_web_page_preview: true,
+      }),
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || !payload.ok) {
+      return {
+        sentAt,
+        status: "failed",
+        errorMessage:
+          payload.description || `Telegram API request failed with status ${response.status}.`,
+      };
+    }
+
+    return {
+      sentAt,
+      status: "sent",
+      messageId: String(payload.result.message_id),
+      errorMessage: null,
+    };
+  } catch (error) {
+    return {
+      sentAt,
+      status: "failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function main() {
   const db = openDb();
   const job = getJob(db);
@@ -124,8 +265,21 @@ async function main() {
 
     settled = true;
     updateFailure(db, logPath, message);
-    logStream.end();
-    db.close();
+    const failedJob = mapJob(getJob(db));
+    sendTelegramNotification(failedJob)
+      .then((result) => {
+        insertNotificationLog(db, {
+          jobId,
+          sentAt: result.sentAt,
+          status: result.status,
+          messageId: result.messageId,
+          errorMessage: result.errorMessage,
+        });
+      })
+      .finally(() => {
+        logStream.end();
+        db.close();
+      });
   }
 
   function settleSuccess(summary, code) {
@@ -136,8 +290,21 @@ async function main() {
     settled = true;
     appendLine(logStream, `[worker] process completed with exit code ${code}`);
     updateSuccess(db, logPath, summary);
-    logStream.end();
-    db.close();
+    const successfulJob = mapJob(getJob(db));
+    sendTelegramNotification(successfulJob)
+      .then((result) => {
+        insertNotificationLog(db, {
+          jobId,
+          sentAt: result.sentAt,
+          status: result.status,
+          messageId: result.messageId,
+          errorMessage: result.errorMessage,
+        });
+      })
+      .finally(() => {
+        logStream.end();
+        db.close();
+      });
   }
 
   child.stdout.on("data", (chunk) => {

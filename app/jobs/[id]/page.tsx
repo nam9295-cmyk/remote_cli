@@ -5,6 +5,7 @@ import { RunJobButton } from "@/components/run-job-button";
 import { StatusBadge } from "@/components/status-badge";
 import { ENGINES } from "@/lib/engines";
 import { getJobById, readJobLogTail } from "@/lib/jobs";
+import { listNotificationLogsByJobId } from "@/lib/notifications";
 import { formatDate } from "@/lib/utils";
 
 type JobDetailPageProps = {
@@ -26,6 +27,7 @@ export default async function JobDetailPage({
   const engine = ENGINES.find((item) => item.id === job.engine);
   const runJob = runJobAction.bind(null, job.id);
   const logLines = readJobLogTail(job.logPath);
+  const notificationLogs = listNotificationLogsByJobId(job.id);
 
   return (
     <div className="space-y-6">
@@ -193,14 +195,62 @@ export default async function JobDetailPage({
             </dl>
           </div>
 
+          <div className="rounded-[28px] border border-[color:var(--line)] bg-[color:var(--surface)] p-5 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--accent)]">
+              Telegram Notifications
+            </p>
+            {notificationLogs.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                {notificationLogs.map((notification) => (
+                  <div
+                    key={notification.id}
+                    className="rounded-2xl bg-[color:var(--surface-strong)] px-4 py-3"
+                  >
+                    <div className="flex items-center justify-between gap-4">
+                      <p className="text-sm font-semibold text-[color:var(--ink-strong)]">
+                        Telegram
+                      </p>
+                      <span
+                        className={
+                          notification.status === "sent"
+                            ? "rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-900"
+                            : "rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-900"
+                        }
+                      >
+                        {notification.status}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs text-[color:var(--muted)]">
+                      {formatDate(notification.sentAt)}
+                    </p>
+                    {notification.messageId ? (
+                      <p className="mt-2 text-sm text-[color:var(--ink)]">
+                        message_id: {notification.messageId}
+                      </p>
+                    ) : null}
+                    {notification.errorMessage ? (
+                      <p className="mt-2 text-sm leading-6 text-rose-800">
+                        {notification.errorMessage}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-4 text-sm leading-6 text-[color:var(--muted)]">
+                아직 텔레그램 전송 이력이 없습니다. 작업 완료 또는 실패 시 자동으로
+                기록됩니다.
+              </div>
+            )}
+          </div>
+
           <div className="rounded-[28px] border border-dashed border-[color:var(--line)] bg-[color:var(--surface)] p-5 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[color:var(--accent)]">
-              Runner Notes
+              Delivery Notes
             </p>
             <p className="mt-3 text-sm leading-6 text-[color:var(--muted)]">
-              보안을 위해 엔진 실행은 미리 정의된 명령만 허용합니다. 기본값은
-              프로젝트 내 mock runner이고, 환경변수로 실제 CLI 명령을 지정하면
-              그 명령으로 대체됩니다.
+              실행이 끝나면 텔레그램 전송을 시도합니다. `PUBLIC_BASE_URL`이 있으면
+              상세 페이지 링크도 메시지에 포함됩니다.
             </p>
           </div>
         </aside>

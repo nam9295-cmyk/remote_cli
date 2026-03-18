@@ -78,7 +78,19 @@ function initializeDatabase(db: DatabaseSync) {
       error_message TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS notification_logs (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      channel_type TEXT NOT NULL CHECK (channel_type IN ('telegram')),
+      sent_at TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+      message_id TEXT,
+      error_message TEXT,
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS notification_logs_job_id_idx ON notification_logs(job_id, sent_at DESC);
   `);
 
   db.prepare(`
