@@ -8,8 +8,10 @@ const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 
 const jobId = process.argv[2];
-const databasePath = path.join(process.cwd(), "data", "remote-cli.sqlite");
-const mockEngineScriptPath = path.join(process.cwd(), "scripts", "mock-engine.cjs");
+const appRoot = process.env.VEREMOTE_APP_ROOT || process.cwd();
+const workspacePath = process.env.VEREMOTE_WORKSPACE_PATH || process.cwd();
+const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
+const mockEngineScriptPath = path.join(appRoot, "scripts", "mock-engine.cjs");
 
 if (!jobId) {
   process.exit(1);
@@ -265,13 +267,13 @@ async function main() {
     process.exit(1);
   }
 
-  const logPath = job.log_path || path.join(process.cwd(), "data", "logs", `${jobId}.log`);
+  const logPath = job.log_path || path.join(appRoot, "data", "logs", `${jobId}.log`);
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const logStream = fs.createWriteStream(logPath, { flags: "a" });
   appendLine(logStream, `[${new Date().toISOString()}] starting ${job.engine} runner`);
 
   const child = spawn(engine.command, engine.buildArgs(job.prompt), {
-    cwd: process.cwd(),
+    cwd: workspacePath,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
