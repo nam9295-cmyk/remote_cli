@@ -1,9 +1,9 @@
 import path from "node:path";
-import type { EngineId, EngineOption } from "@/lib/types";
+import type { EngineId, EngineOption, JobMode } from "@/lib/types";
 
 export interface EngineConfig extends EngineOption {
   command: string;
-  buildArgs: (input: { jobId: string; prompt: string }) => string[];
+  buildArgs: (input: { jobId: string; prompt: string; mode?: JobMode }) => string[];
   enabled: boolean;
 }
 
@@ -39,9 +39,14 @@ export const ENGINE_CONFIGS: Record<EngineId, EngineConfig> = {
     description: "빠른 초안, 요약, 리서치 업무에 적합한 기본 엔진",
     commandPreview: "node scripts/mock-engine.cjs gemini <job-id> <prompt>",
     command: geminiRuntimeCommand?.command || process.execPath,
-    buildArgs: ({ jobId, prompt }) =>
+    buildArgs: ({ jobId, prompt, mode }) =>
       geminiRuntimeCommand
-        ? [...geminiRuntimeCommand.baseArgs, "-p", prompt]
+        ? [
+            ...geminiRuntimeCommand.baseArgs,
+            ...(mode === "edit" ? ["--approval-mode", "auto_edit"] : []),
+            "-p",
+            prompt,
+          ]
         : [mockEngineScriptPath, "gemini", jobId, prompt],
     enabled: true,
   },

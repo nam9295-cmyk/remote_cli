@@ -43,9 +43,14 @@ function getEngineConfig(engineId) {
   const configs = {
     gemini: {
       command: (geminiRuntimeCommand && geminiRuntimeCommand.command) || process.execPath,
-      buildArgs(prompt) {
+      buildArgs(prompt, mode) {
         return geminiRuntimeCommand
-          ? [...geminiRuntimeCommand.baseArgs, "-p", prompt]
+          ? [
+              ...geminiRuntimeCommand.baseArgs,
+              ...(mode === "edit" ? ["--approval-mode", "auto_edit"] : []),
+              "-p",
+              prompt,
+            ]
           : [mockEngineScriptPath, "gemini", jobId, prompt];
       },
     },
@@ -407,7 +412,7 @@ async function main() {
   const workspaceSnapshotBefore =
     job.mode === "edit" ? snapshotWorkspace(workspacePath) : new Map();
 
-  const child = spawn(engine.command, engine.buildArgs(job.prompt), {
+  const child = spawn(engine.command, engine.buildArgs(job.prompt, job.mode), {
     cwd: workspacePath,
     env: {
       ...process.env,
@@ -416,7 +421,10 @@ async function main() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  appendLine(logStream, `[worker] command: ${engine.command} ${engine.buildArgs(job.prompt).join(" ")}`);
+  appendLine(
+    logStream,
+    `[worker] command: ${engine.command} ${engine.buildArgs(job.prompt, job.mode).join(" ")}`,
+  );
 
   let lastStdoutLine = "";
   let stderrLines = [];
