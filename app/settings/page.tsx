@@ -1,9 +1,11 @@
 import { SectionHeader } from "@/components/section-header";
-import { ENGINES } from "@/lib/data";
 import { getDatabasePath } from "@/lib/db";
+import { getLogsDirectory } from "@/lib/jobs";
+import { ENGINES } from "@/lib/engines";
 
 export default function SettingsPage() {
   const databasePath = getDatabasePath();
+  const logsDirectory = getLogsDirectory();
 
   return (
     <div className="space-y-6">
@@ -66,7 +68,7 @@ export default function SettingsPage() {
                   로그 저장 경로
                 </span>
                 <input
-                  defaultValue="/Users/nam9295/Desktop/john_2.0/data/logs"
+                  defaultValue={logsDirectory}
                   className="w-full rounded-2xl border border-[color:var(--line)] bg-white px-4 py-3 text-sm outline-none"
                 />
               </label>
@@ -116,7 +118,7 @@ export default function SettingsPage() {
             </h2>
             <ul className="mt-4 space-y-3 text-sm leading-6 text-[color:var(--muted)]">
               <li>실제 저장은 Task 02에서 SQLite와 함께 연결됩니다.</li>
-              <li>실행 명령 검증과 `spawn` 연결은 Task 03 범위입니다.</li>
+              <li>`*_CLI_COMMAND` 환경변수를 지정하면 실제 CLI 명령으로 교체됩니다.</li>
               <li>텔레그램 전송과 이력 저장은 Task 04에서 붙입니다.</li>
             </ul>
           </div>

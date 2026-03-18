@@ -1,25 +1,4 @@
-import type { EngineOption, Job } from "@/lib/types";
-
-export const ENGINES: EngineOption[] = [
-  {
-    id: "gemini",
-    name: "Gemini CLI",
-    commandPreview: "gemini run --prompt <text>",
-    description: "빠른 초안, 요약, 리서치 업무에 적합한 기본 엔진",
-  },
-  {
-    id: "codex",
-    name: "Codex CLI",
-    commandPreview: "codex run --model gpt-5.4 <prompt>",
-    description: "코드 생성과 수정, 프로젝트 자동화에 적합한 엔진",
-  },
-  {
-    id: "custom",
-    name: "Custom Runner",
-    commandPreview: "./scripts/custom-runner.sh <job-id>",
-    description: "사내 스크립트나 워크플로를 붙일 수 있는 확장 슬롯",
-  },
-];
+import type { Job } from "@/lib/types";
 
 export const INITIAL_JOBS: Job[] = [
   {

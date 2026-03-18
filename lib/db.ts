@@ -81,6 +81,16 @@ function initializeDatabase(db: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC);
   `);
 
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = 'failed',
+      finished_at = updated_at,
+      error_message = 'Runner state was reset during startup.',
+      result_summary = '이전 실행 상태를 복구하지 못해 failed 로 전환되었습니다.'
+    WHERE status = 'running' AND log_path IS NULL
+  `).run();
+
   const row = db
     .prepare("SELECT COUNT(*) AS count FROM jobs")
     .get() as { count: number };

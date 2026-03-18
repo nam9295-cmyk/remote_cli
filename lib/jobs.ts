@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
 import type { EngineId, Job, JobStatus } from "@/lib/types";
@@ -23,6 +25,8 @@ export interface CreateJobInput {
   engine: EngineId;
   prompt: string;
 }
+
+const LOGS_DIR = path.join(process.cwd(), "data", "logs");
 
 function mapJob(row: JobRow): Job {
   return {
@@ -129,4 +133,96 @@ export function createJob(input: CreateJobInput) {
   );
 
   return job;
+}
+
+export function getLogsDirectory() {
+  mkdirSync(LOGS_DIR, { recursive: true });
+  return LOGS_DIR;
+}
+
+export function createLogPath(jobId: string) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return path.join(getLogsDirectory(), `${jobId}-${timestamp}.log`);
+}
+
+export function markJobAsRunning(jobId: string, logPath: string) {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = 'running',
+      started_at = ?,
+      finished_at = NULL,
+      updated_at = ?,
+      result_summary = ?,
+      log_path = ?,
+      error_message = NULL
+    WHERE id = ?
+  `).run(
+    now,
+    now,
+    "Runner started. 로그가 생성되는 중입니다.",
+    logPath,
+    jobId,
+  );
+}
+
+export function markJobAsSuccess(jobId: string, resultSummary: string, logPath: string) {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = 'success',
+      updated_at = ?,
+      finished_at = ?,
+      result_summary = ?,
+      log_path = ?,
+      error_message = NULL
+    WHERE id = ?
+  `).run(now, now, resultSummary, logPath, jobId);
+}
+
+export function markJobAsFailed(jobId: string, errorMessage: string, logPath: string | null) {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = 'failed',
+      updated_at = ?,
+      finished_at = ?,
+      result_summary = ?,
+      log_path = COALESCE(?, log_path),
+      error_message = ?
+    WHERE id = ?
+  `).run(
+    now,
+    now,
+    "작업 실행 중 오류가 발생했습니다.",
+    logPath,
+    errorMessage,
+    jobId,
+  );
+}
+
+export function readJobLogTail(logPath: string | null, maxLines = 120) {
+  if (!logPath) {
+    return [];
+  }
+
+  try {
+    const content = readFileSync(logPath, "utf8");
+
+    return content
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-maxLines);
+  } catch {
+    return [];
+  }
 }

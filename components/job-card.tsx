@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { StatusBadge } from "@/components/status-badge";
+import { ENGINES } from "@/lib/engines";
 import { formatDate } from "@/lib/utils";
-import { ENGINES } from "@/lib/data";
 import type { Job } from "@/lib/types";
 
 interface JobCardProps {
