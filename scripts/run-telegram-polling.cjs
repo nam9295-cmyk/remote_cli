@@ -416,6 +416,35 @@ function truncate(value, length) {
   return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
 }
 
+function formatElapsed(startedAt) {
+  if (!startedAt) {
+    return null;
+  }
+
+  const started = new Date(startedAt).getTime();
+
+  if (Number.isNaN(started)) {
+    return null;
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const hours = Math.floor(elapsedSeconds / 3600);
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const parts = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`);
+  }
+
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
 function formatTimestamp(value) {
   if (!value) {
     return "-";
@@ -429,6 +458,118 @@ function formatTimestamp(value) {
   } catch {
     return value;
   }
+}
+
+function readLogTail(logPath, lineCount = 10) {
+  if (!logPath) {
+    return { lines: [], fallback: "로그 생성 중입니다." };
+  }
+
+  try {
+    if (!fs.existsSync(logPath)) {
+      return { lines: [], fallback: "로그 파일이 아직 생성되지 않았습니다." };
+    }
+
+    const stats = fs.statSync(logPath);
+
+    if (stats.size === 0) {
+      return { lines: [], fallback: "로그가 아직 비어 있습니다." };
+    }
+
+    const maxBytes = 24 * 1024;
+    const start = Math.max(0, stats.size - maxBytes);
+    const fd = fs.openSync(logPath, "r");
+    const buffer = Buffer.alloc(stats.size - start);
+
+    try {
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    const content = buffer.toString("utf8");
+    const rawLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+    if (rawLines.length === 0) {
+      return { lines: [], fallback: "로그가 아직 비어 있습니다." };
+    }
+
+    const limitedLines = rawLines.slice(-lineCount);
+    const maxChars = 1200;
+    const joined = limitedLines.join("\n");
+
+    if (joined.length <= maxChars) {
+      return { lines: limitedLines, fallback: null };
+    }
+
+    const trimmed = joined.slice(joined.length - maxChars + 1);
+    const trimmedLines = trimmed.split("\n");
+    trimmedLines[0] = `…${trimmedLines[0]}`;
+
+    return { lines: trimmedLines, fallback: null };
+  } catch {
+    return { lines: [], fallback: "로그를 읽는 중 오류가 발생했습니다." };
+  }
+}
+
+function buildJobReply(job) {
+  const detailUrl = getJobUrl(job.id);
+  const lines = [
+    `id: ${job.id}`,
+    `title: ${job.title}`,
+    `status: ${job.status}`,
+    `engine: ${job.engine}`,
+  ];
+
+  if (job.mode) {
+    lines.push(`mode: ${job.mode}`);
+  }
+
+  lines.push(`started: ${formatTimestamp(job.started_at || job.created_at)}`);
+
+  const elapsed = formatElapsed(job.started_at);
+
+  if (elapsed) {
+    lines.push(`elapsed: ${elapsed}`);
+  }
+
+  if (job.status === "running") {
+    const logTail = readLogTail(job.log_path, 10);
+
+    lines.push("progress: 실행 중");
+
+    if (logTail.lines.length > 0) {
+      lines.push("recent logs:");
+      lines.push(logTail.lines.join("\n"));
+    } else {
+      lines.push(`recent logs: ${logTail.fallback}`);
+    }
+  } else if (job.status === "queued") {
+    lines.push("summary: 대기 중입니다.");
+  } else {
+    lines.push(`summary: ${job.result_summary || "-"}`);
+
+    if (job.error_message) {
+      lines.push(`error: ${job.error_message}`);
+    }
+
+    if (job.changed_files_json) {
+      try {
+        const changedFiles = JSON.parse(job.changed_files_json);
+        if (Array.isArray(changedFiles) && changedFiles.length > 0) {
+          lines.push(`changed: ${changedFiles.join(", ")}`);
+        }
+      } catch {
+        // Ignore malformed stored data.
+      }
+    }
+  }
+
+  if (detailUrl) {
+    lines.push(`detail: ${detailUrl}`);
+  }
+
+  return lines.join("\n");
 }
 
 async function handleCommand(db, text) {
@@ -497,36 +638,8 @@ async function handleCommand(db, text) {
       return { replyText: "아직 작업이 없습니다.", resultText: "last empty" };
     }
 
-    const detailUrl = getJobUrl(job.id);
-    const lines = [
-      `id: ${job.id}`,
-      `title: ${job.title}`,
-      `status: ${job.status}`,
-      `engine: ${job.engine}`,
-      `summary: ${job.result_summary || "-"}`,
-    ];
-
-    if (job.mode) {
-      lines.push(`mode: ${job.mode}`);
-    }
-
-    if (job.changed_files_json) {
-      try {
-        const changedFiles = JSON.parse(job.changed_files_json);
-        if (Array.isArray(changedFiles) && changedFiles.length > 0) {
-          lines.push(`changed: ${changedFiles.join(", ")}`);
-        }
-      } catch {
-        // Ignore malformed stored data.
-      }
-    }
-
-    if (detailUrl) {
-      lines.push(`detail: ${detailUrl}`);
-    }
-
     return {
-      replyText: lines.join("\n"),
+      replyText: buildJobReply(job),
       resultText: `last sent for ${job.id}`,
     };
   }
@@ -550,36 +663,8 @@ async function handleCommand(db, text) {
       };
     }
 
-    const detailUrl = getJobUrl(job.id);
-    const lines = [
-      `id: ${job.id}`,
-      `title: ${job.title}`,
-      `status: ${job.status}`,
-      `engine: ${job.engine}`,
-      `summary: ${job.result_summary || "-"}`,
-    ];
-
-    if (job.mode) {
-      lines.push(`mode: ${job.mode}`);
-    }
-
-    if (job.changed_files_json) {
-      try {
-        const changedFiles = JSON.parse(job.changed_files_json);
-        if (Array.isArray(changedFiles) && changedFiles.length > 0) {
-          lines.push(`changed: ${changedFiles.join(", ")}`);
-        }
-      } catch {
-        // Ignore malformed stored data.
-      }
-    }
-
-    if (detailUrl) {
-      lines.push(`detail: ${detailUrl}`);
-    }
-
     return {
-      replyText: lines.join("\n"),
+      replyText: buildJobReply(job),
       resultText: `job sent for ${job.id}`,
     };
   }
