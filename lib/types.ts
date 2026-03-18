@@ -36,3 +36,14 @@ export interface NotificationLog {
   messageId: string | null;
   errorMessage: string | null;
 }
+
+export interface ActiveWorkspace {
+  id: string;
+  path: string;
+  name: string;
+  engine: EngineId;
+  isActive: boolean;
+  connectedAt: string;
+  lastHeartbeatAt: string | null;
+  chatId: string | null;
+}

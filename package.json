@@ -2,11 +2,16 @@
   "name": "remote-cli-dashboard",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "veremote": "./scripts/veremote.cjs"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "telegram:poll": "node --env-file=.env.local scripts/run-telegram-polling.cjs",
+    "veremote": "node scripts/veremote.cjs"
   },
   "dependencies": {
     "next": "16.1.7",

@@ -2,10 +2,12 @@ import { SectionHeader } from "@/components/section-header";
 import { getDatabasePath } from "@/lib/db";
 import { getLogsDirectory } from "@/lib/jobs";
 import { ENGINES } from "@/lib/engines";
+import { getTelegramPollingState } from "@/lib/telegram-polling";
 
 export default function SettingsPage() {
   const databasePath = getDatabasePath();
   const logsDirectory = getLogsDirectory();
+  const pollingState = getTelegramPollingState();
 
   return (
     <div className="space-y-6">
@@ -85,6 +87,39 @@ export default function SettingsPage() {
         <aside className="space-y-6">
           <div className="rounded-[32px] border border-[color:var(--line)] bg-[color:var(--surface)] p-6 shadow-sm">
             <h2 className="font-display text-2xl font-semibold text-[color:var(--ink-strong)]">
+              Telegram Polling
+            </h2>
+            <div className="mt-5 space-y-4 text-sm">
+              <div className="rounded-[24px] bg-[color:var(--surface-strong)] p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <p className="font-semibold text-[color:var(--ink-strong)]">
+                    polling enabled
+                  </p>
+                  <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[color:var(--muted)] ring-1 ring-[color:var(--line)]">
+                    {pollingState.enabled ? "true" : "false"}
+                  </span>
+                </div>
+                <p className="mt-2 text-[color:var(--muted)]">
+                  interval: {pollingState.intervalMs}ms
+                </p>
+                <p className="mt-2 text-[color:var(--muted)]">
+                  last update id: {pollingState.lastUpdateId}
+                </p>
+                <p className="mt-2 text-[color:var(--muted)]">
+                  last polled at: {pollingState.lastPolledAt ?? "-"}
+                </p>
+                <p className="mt-2 break-words text-[color:var(--muted)]">
+                  last command: {pollingState.lastCommandText ?? "-"}
+                </p>
+                <p className="mt-2 break-words text-[color:var(--muted)]">
+                  last result: {pollingState.lastResultText ?? "-"}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[32px] border border-[color:var(--line)] bg-[color:var(--surface)] p-6 shadow-sm">
+            <h2 className="font-display text-2xl font-semibold text-[color:var(--ink-strong)]">
               Telegram
             </h2>
             <div className="mt-5 space-y-4">
@@ -120,6 +155,11 @@ export default function SettingsPage() {
               작업이 `success` 또는 `failed`로 끝나면 텔레그램 메시지를 자동으로
               전송합니다. 토큰이나 채팅방 정보가 없으면 전송 실패 이력이 상세 화면에
               기록됩니다.
+            </div>
+            <div className="mt-5 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-4 text-sm leading-6 text-[color:var(--muted)]">
+              텔레그램 명령 수신은 `npm run telegram:poll` 로 별도 실행합니다.
+              허용된 chat id의 `/help`, `/status`, `/last`, `/job &lt;id&gt;`,
+              `/run gemini &lt;prompt&gt;` 만 처리합니다.
             </div>
           </div>
 

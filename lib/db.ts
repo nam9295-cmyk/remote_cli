@@ -3,7 +3,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { INITIAL_JOBS } from "@/lib/data";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const APP_ROOT = process.env.VEREMOTE_APP_ROOT || process.cwd();
+const DATA_DIR = path.join(APP_ROOT, "data");
 const DATABASE_PATH = path.join(DATA_DIR, "remote-cli.sqlite");
 
 type GlobalWithDb = typeof globalThis & {
@@ -89,9 +90,40 @@ function initializeDatabase(db: DatabaseSync) {
       FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS active_workspace (
+      id TEXT PRIMARY KEY,
+      path TEXT NOT NULL,
+      name TEXT NOT NULL,
+      engine TEXT NOT NULL CHECK (engine IN ('gemini', 'codex', 'custom')),
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+      connected_at TEXT NOT NULL,
+      last_heartbeat_at TEXT,
+      chat_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS telegram_polling_state (
+      id TEXT PRIMARY KEY,
+      last_update_id INTEGER NOT NULL DEFAULT 0,
+      last_polled_at TEXT,
+      last_command_text TEXT,
+      last_result_text TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC);
     CREATE INDEX IF NOT EXISTS notification_logs_job_id_idx ON notification_logs(job_id, sent_at DESC);
   `);
+
+  db.prepare(`
+    INSERT INTO telegram_polling_state (
+      id,
+      last_update_id,
+      last_polled_at,
+      last_command_text,
+      last_result_text
+    )
+    VALUES ('main', 0, NULL, NULL, NULL)
+    ON CONFLICT(id) DO NOTHING
+  `).run();
 
   db.prepare(`
     UPDATE jobs
