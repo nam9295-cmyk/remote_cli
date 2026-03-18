@@ -6,6 +6,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
+const sharp = require("sharp");
+const { chromium } = require("playwright");
 
 const jobId = process.argv[2];
 const appRoot = process.env.VEREMOTE_APP_ROOT || process.cwd();
@@ -145,6 +147,17 @@ function updateSuccess(db, logPath, summary, changedFiles) {
   `).run(now, now, summary, JSON.stringify(changedFiles || []), logPath, jobId);
 }
 
+function setPreviewImagePath(db, previewImagePath) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE jobs
+    SET
+      updated_at = ?,
+      preview_image_path = ?
+    WHERE id = ?
+  `).run(now, previewImagePath, jobId);
+}
+
 function updateFailure(db, logPath, message, changedFiles) {
   const now = new Date().toISOString();
   db.prepare(`
@@ -206,10 +219,12 @@ function shouldIgnoreWorkspaceEntry(relativePath) {
   return (
     relativePath === ".git" ||
     relativePath === ".next" ||
+    relativePath === ".veremote" ||
     relativePath === "node_modules" ||
     relativePath === "data" ||
     relativePath.startsWith(".git/") ||
     relativePath.startsWith(".next/") ||
+    relativePath.startsWith(".veremote/") ||
     relativePath.startsWith("node_modules/") ||
     relativePath.startsWith("data/")
   );
@@ -305,6 +320,175 @@ function buildJobDetailUrl(jobIdValue) {
   return `${baseUrl.replace(/\/$/, "")}/jobs/${jobIdValue}`;
 }
 
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function wrapText(value, maxChars, maxLines) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+
+  if (!text) {
+    return [];
+  }
+
+  const words = text.split(" ");
+  const lines = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+    }
+
+    current = word;
+
+    if (lines.length >= maxLines - 1) {
+      break;
+    }
+  }
+
+  if (current && lines.length < maxLines) {
+    lines.push(current);
+  }
+
+  if (words.join(" ").length > lines.join(" ").length) {
+    lines[lines.length - 1] = `${lines[lines.length - 1].slice(0, Math.max(0, maxChars - 1))}…`;
+  }
+
+  return lines;
+}
+
+function createPreviewImagePath() {
+  const previewDir = path.join(workspacePath, ".veremote", "previews");
+  fs.mkdirSync(previewDir, { recursive: true });
+  return path.join(previewDir, `${jobId}.png`);
+}
+
+function resolveWorkspaceAssetPath(assetPath) {
+  if (!assetPath || !assetPath.trim()) {
+    return null;
+  }
+
+  const trimmed = assetPath.trim();
+  return path.isAbsolute(trimmed) ? trimmed : path.join(workspacePath, trimmed);
+}
+
+async function generatePreviewFromImageFile(sourcePath) {
+  const previewPath = createPreviewImagePath();
+  await sharp(sourcePath).png().toFile(previewPath);
+  return previewPath;
+}
+
+async function generatePreviewFromUrl(previewUrl) {
+  const previewPath = createPreviewImagePath();
+  const browser = await chromium.launch({ headless: true });
+
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1024 },
+      deviceScaleFactor: 2,
+    });
+    await page.goto(previewUrl, { waitUntil: "networkidle", timeout: 15000 });
+    await page.screenshot({
+      path: previewPath,
+      fullPage: true,
+      type: "png",
+    });
+  } finally {
+    await browser.close();
+  }
+
+  return previewPath;
+}
+
+async function generatePreviewImage(job) {
+  const previewPath = createPreviewImagePath();
+  const workspaceName = path.basename(job.workspacePath || workspacePath) || workspacePath;
+  const summaryLines = wrapText(
+    job.status === "failed" ? job.errorMessage || job.resultSummary : job.resultSummary,
+    42,
+    5,
+  );
+  const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles.slice(0, 4) : [];
+  const accent = job.status === "success" ? "#b7d3a8" : "#e7b18b";
+  const changedSection =
+    job.mode === "edit"
+      ? changedFiles.map((line, index) => `<text x="88" y="${620 + index * 36}" font-size="24" fill="#c9d1d9">${escapeXml(line)}</text>`).join("")
+      : "";
+  const changedLabel =
+    job.mode === "edit"
+      ? `<text x="88" y="580" font-size="24" fill="#d8b8c8">changed files</text>`
+      : "";
+  const summarySection = summaryLines
+    .map((line, index) => `<text x="88" y="${364 + index * 42}" font-size="30" fill="#f2ede7">${escapeXml(line)}</text>`)
+    .join("");
+
+  const svg = `
+    <svg width="1400" height="900" viewBox="0 0 1400 900" xmlns="http://www.w3.org/2000/svg">
+      <rect width="1400" height="900" fill="#111214"/>
+      <rect x="36" y="36" width="1328" height="828" rx="32" fill="#17191d" stroke="#444c56" stroke-width="2"/>
+      <text x="88" y="122" font-size="42" font-weight="700" fill="#d8b8c8">veremote</text>
+      <text x="88" y="178" font-size="22" fill="#96b8b1">workspace ${escapeXml(workspaceName)}  •  engine ${escapeXml(job.engine)}  •  mode ${escapeXml(job.mode)}</text>
+      <text x="88" y="250" font-size="54" font-weight="700" fill="#f8f4ef">${escapeXml(job.title)}</text>
+      <text x="88" y="305" font-size="26" fill="${accent}">status ${escapeXml(job.status)}</text>
+      <text x="88" y="328" font-size="24" fill="#d8b8c8">summary</text>
+      ${summarySection}
+      ${changedLabel}
+      ${changedSection}
+      <text x="88" y="810" font-size="22" fill="#8b949e">job ${escapeXml(job.id)}</text>
+      <text x="88" y="844" font-size="20" fill="#6e7681">${escapeXml(job.previewImagePath || previewPath)}</text>
+    </svg>
+  `;
+
+  await sharp(Buffer.from(svg)).png().toFile(previewPath);
+  return previewPath;
+}
+
+async function generateBestPreviewImage(job, logStream) {
+  const configuredImagePath = resolveWorkspaceAssetPath(
+    process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
+  );
+
+  if (configuredImagePath) {
+    if (fs.existsSync(configuredImagePath)) {
+      appendLine(logStream, `[worker] using configured preview image: ${configuredImagePath}`);
+      return generatePreviewFromImageFile(configuredImagePath);
+    }
+
+    appendLine(logStream, `[worker] configured preview image missing: ${configuredImagePath}`);
+  }
+
+  const configuredPreviewUrl =
+    (process.env.WORKSPACE_PREVIEW_URL && process.env.WORKSPACE_PREVIEW_URL.trim()) || null;
+
+  if (configuredPreviewUrl) {
+    try {
+      appendLine(logStream, `[worker] capturing preview url: ${configuredPreviewUrl}`);
+      return await generatePreviewFromUrl(configuredPreviewUrl);
+    } catch (error) {
+      appendLine(
+        logStream,
+        `[worker] preview url capture failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  appendLine(logStream, "[worker] falling back to summary preview image");
+  return generatePreviewImage(job);
+}
+
 function buildTelegramText(job) {
   const lines = [
     job.status === "success" ? "[Remote CLI] 작업 완료" : "[Remote CLI] 작업 실패",
@@ -328,6 +512,10 @@ function buildTelegramText(job) {
     lines.push(`에러: ${job.errorMessage}`);
   }
 
+  if (job.previewImagePath) {
+    lines.push(`PNG: ${job.previewImagePath}`);
+  }
+
   const detailUrl = buildJobDetailUrl(job.id);
 
   if (detailUrl) {
@@ -335,6 +523,32 @@ function buildTelegramText(job) {
   }
 
   return lines.join("\n");
+}
+
+async function sendTelegramPhoto(token, chatId, photoPath, caption) {
+  const formData = new FormData();
+  formData.set("chat_id", chatId);
+  formData.set("caption", caption.slice(0, 900));
+  formData.set(
+    "photo",
+    new Blob([fs.readFileSync(photoPath)]),
+    path.basename(photoPath),
+  );
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    body: formData,
+  });
+
+  const payload = await response.json();
+
+  if (!response.ok || !payload.ok) {
+    throw new Error(
+      payload.description || `Telegram API request failed with status ${response.status}.`,
+    );
+  }
+
+  return payload.result;
 }
 
 async function sendTelegramNotification(job) {
@@ -352,6 +566,18 @@ async function sendTelegramNotification(job) {
   }
 
   try {
+    const text = buildTelegramText(job);
+
+    if (job.previewImagePath && fs.existsSync(job.previewImagePath)) {
+      const payload = await sendTelegramPhoto(token, chatId, job.previewImagePath, text);
+      return {
+        sentAt,
+        status: "sent",
+        messageId: String(payload.message_id),
+        errorMessage: null,
+      };
+    }
+
     const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: {
@@ -359,7 +585,7 @@ async function sendTelegramNotification(job) {
       },
       body: JSON.stringify({
         chat_id: chatId,
-        text: buildTelegramText(job),
+        text,
         disable_web_page_preview: true,
       }),
     });
@@ -442,7 +668,17 @@ async function main() {
         : [];
     updateFailure(db, logPath, message, changedFiles);
     const failedJob = mapJob(getJob(db));
-    sendTelegramNotification(failedJob)
+    generateBestPreviewImage(failedJob, logStream)
+      .then((previewImagePath) => {
+        setPreviewImagePath(db, previewImagePath);
+        appendLine(logStream, `[worker] preview image saved: ${previewImagePath}`);
+        return mapJob(getJob(db));
+      })
+      .catch((error) => {
+        appendLine(logStream, `[worker] preview image failed: ${error.message}`);
+        return failedJob;
+      })
+      .then((jobWithPreview) => sendTelegramNotification(jobWithPreview))
       .then((result) => {
         insertNotificationLog(db, {
           jobId,
@@ -474,7 +710,17 @@ async function main() {
     }
     updateSuccess(db, logPath, summary, changedFiles);
     const successfulJob = mapJob(getJob(db));
-    sendTelegramNotification(successfulJob)
+    generateBestPreviewImage(successfulJob, logStream)
+      .then((previewImagePath) => {
+        setPreviewImagePath(db, previewImagePath);
+        appendLine(logStream, `[worker] preview image saved: ${previewImagePath}`);
+        return mapJob(getJob(db));
+      })
+      .catch((error) => {
+        appendLine(logStream, `[worker] preview image failed: ${error.message}`);
+        return successfulJob;
+      })
+      .then((jobWithPreview) => sendTelegramNotification(jobWithPreview))
       .then((result) => {
         insertNotificationLog(db, {
           jobId,

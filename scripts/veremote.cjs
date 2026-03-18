@@ -285,6 +285,7 @@ function buildWorkspaceTelegramText(workspace) {
     "/engine codex",
     "/run 이 프로젝트를 한 줄로 요약해줘",
     "/edit Header.tsx의 메인 타이틀을 더 크게 수정해줘",
+    "/screenshot job_xxx",
   ].join("\n");
 }
 
@@ -872,7 +873,7 @@ function buildHelpText() {
   lines.push("engine gemini / engine codex switches the active engine");
   lines.push("status / where append details to the log panel");
   lines.push("run / edit create background jobs immediately");
-  lines.push("telegram examples: /where /engine codex /run ... /edit ...");
+  lines.push("telegram examples: /where /engine codex /run ... /edit ... /screenshot job_xxx");
   lines.push("run `veremote daemon` in another terminal to receive telegram commands");
   lines.push("the prompt stays pinned to the bottom");
 
@@ -1210,7 +1211,7 @@ function startFullScreenTui(db) {
   }
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
-  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘");
+  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘, /screenshot job_xxx");
   appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
   const intervalId = setInterval(pollWatchers, 1000);
@@ -1348,7 +1349,7 @@ async function runCommandMode(command) {
 
     if (workspace) {
       printStatus(workspace);
-      printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>");
+      printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>, /screenshot <job id>");
     } else {
       printMessage(
         "No active workspace is connected yet. Telegram commands that require a workspace will be rejected until you run `veremote connect`.",

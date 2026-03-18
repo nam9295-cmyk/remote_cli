@@ -407,6 +407,30 @@ async function sendMessage(text) {
   });
 }
 
+async function sendPhoto(imagePath, caption) {
+  const formData = new FormData();
+  formData.set("chat_id", allowedChatId);
+  formData.set("caption", String(caption || "").slice(0, 900));
+  formData.set(
+    "photo",
+    new Blob([fs.readFileSync(imagePath)]),
+    path.basename(imagePath),
+  );
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    body: formData,
+  });
+
+  const payload = await response.json();
+
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.description || "Telegram API sendPhoto failed.");
+  }
+
+  return payload.result;
+}
+
 function writeDaemonPidFile() {
   fs.mkdirSync(path.dirname(DAEMON_PID_PATH), { recursive: true });
   fs.writeFileSync(DAEMON_PID_PATH, `${process.pid}\n`, "utf8");
@@ -607,6 +631,10 @@ function buildJobReply(job) {
     lines.push(`detail: ${detailUrl}`);
   }
 
+  if (job.preview_image_path) {
+    lines.push(`preview: ${job.preview_image_path}`);
+  }
+
   return lines.join("\n");
 }
 
@@ -627,6 +655,7 @@ async function handleCommand(db, text) {
         "/status",
         "/last",
         "/job <id>",
+        "/screenshot <id>",
         "/run <prompt>",
         "/edit <prompt>",
       ].join("\n"),
@@ -750,6 +779,46 @@ async function handleCommand(db, text) {
     return {
       replyText: buildJobReply(job),
       resultText: `job sent for ${job.id}`,
+    };
+  }
+
+  if (command === "/screenshot") {
+    const jobId = argsText.trim();
+
+    if (!jobId) {
+      return {
+        replyText: "사용법: /screenshot <id>",
+        resultText: "screenshot usage sent",
+      };
+    }
+
+    const job = getJobById(db, jobId);
+
+    if (!job) {
+      return {
+        replyText: `작업을 찾을 수 없습니다: ${jobId}`,
+        resultText: `screenshot job not found ${jobId}`,
+      };
+    }
+
+    if (!job.preview_image_path || !fs.existsSync(job.preview_image_path)) {
+      return {
+        replyText:
+          job.status === "running" || job.status === "queued"
+            ? "아직 생성된 PNG가 없습니다. 작업이 끝난 뒤 다시 시도해주세요."
+            : "보낼 수 있는 PNG가 없습니다. 이 작업은 아직 미리보기 이미지를 만들지 못했습니다.",
+        resultText: `screenshot unavailable for ${job.id}`,
+      };
+    }
+
+    await sendPhoto(
+      job.preview_image_path,
+      [`job: ${job.id}`, `title: ${job.title}`, `status: ${job.status}`].join("\n"),
+    );
+
+    return {
+      replyText: null,
+      resultText: `screenshot sent for ${job.id}`,
     };
   }
 
