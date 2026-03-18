@@ -31,6 +31,7 @@ const DEFAULT_LOGO_LINES = [
 const HELP_ROWS = [
   ["run <prompt>", "Start a read-first job in the current workspace"],
   ["edit <prompt>", "Start an editable job in the current workspace"],
+  ["engine <name>", "Switch engine: gemini, codex, custom"],
   ["where", "Show the current workspace path and engine"],
   ["status", "Show the full workspace summary"],
   ["help", "Show the command reference"],
@@ -157,14 +158,22 @@ function getActiveWorkspace(db) {
   );
 }
 
-function connectWorkspace(db) {
+function connectWorkspace(db, options = {}) {
   const now = new Date().toISOString();
   const existing = getActiveWorkspace(db);
+  const selectedEngine =
+    options.engine ||
+    (existing &&
+    existing.is_active &&
+    existing.path === CURRENT_CWD &&
+    ALLOWED_ENGINES.has(existing.engine)
+      ? existing.engine
+      : DEFAULT_ENGINE);
   const didChange =
     !existing ||
     !existing.is_active ||
     existing.path !== CURRENT_CWD ||
-    existing.engine !== DEFAULT_ENGINE;
+    existing.engine !== selectedEngine;
 
   db.prepare(`
     INSERT INTO active_workspace (
@@ -189,7 +198,7 @@ function connectWorkspace(db) {
   `).run(
     CURRENT_CWD,
     getWorkspaceName(CURRENT_CWD),
-    DEFAULT_ENGINE,
+    selectedEngine,
     now,
     now,
     TELEGRAM_CHAT_ID || null,
@@ -200,6 +209,25 @@ function connectWorkspace(db) {
     didChange,
     replacedPath:
       existing && existing.path !== CURRENT_CWD ? existing.path : null,
+  };
+}
+
+function setWorkspaceEngine(db, engine) {
+  if (!ALLOWED_ENGINES.has(engine)) {
+    return {
+      ok: false,
+      error: `Unsupported engine: ${engine}`,
+      workspace: getActiveWorkspace(db),
+    };
+  }
+
+  const result = connectWorkspace(db, { engine });
+
+  return {
+    ok: true,
+    workspace: result.workspace,
+    didChange: result.didChange,
+    replacedPath: result.replacedPath,
   };
 }
 
@@ -253,6 +281,8 @@ function buildWorkspaceTelegramText(workspace) {
     "",
     "commands:",
     "/where",
+    "/engine gemini",
+    "/engine codex",
     "/run 이 프로젝트를 한 줄로 요약해줘",
     "/edit Header.tsx의 메인 타이틀을 더 크게 수정해줘",
   ].join("\n");
@@ -619,6 +649,7 @@ function printUsage() {
   console.log(paint("─────", ANSI.line));
   console.log("veremote");
   console.log("veremote connect");
+  console.log("veremote engine <gemini|codex|custom>");
   console.log("veremote status");
   console.log("veremote disconnect");
   console.log("veremote daemon");
@@ -838,9 +869,10 @@ function buildHelpText() {
 
   lines.push("");
   lines.push("tips");
+  lines.push("engine gemini / engine codex switches the active engine");
   lines.push("status / where append details to the log panel");
   lines.push("run / edit create background jobs immediately");
-  lines.push("telegram examples: /where /run ... /edit ...");
+  lines.push("telegram examples: /where /engine codex /run ... /edit ...");
   lines.push("run `veremote daemon` in another terminal to receive telegram commands");
   lines.push("the prompt stays pinned to the bottom");
 
@@ -1095,6 +1127,31 @@ function startFullScreenTui(db) {
       return;
     }
 
+    if (command === "engine") {
+      if (!prompt) {
+        const workspace = touchWorkspace(db);
+        appendSystem(`Current engine: ${workspace ? workspace.engine : DEFAULT_ENGINE}`);
+        refreshSummary();
+        return;
+      }
+
+      const nextEngine = prompt.split(/\s+/)[0].trim();
+      const result = setWorkspaceEngine(db, nextEngine);
+
+      if (!result.ok) {
+        appendSystem(`${result.error}. Allowed: gemini, codex, custom`);
+        refreshSummary();
+        return;
+      }
+
+      appendSystem([
+        `engine switched to ${result.workspace.engine}`,
+        `workspace: ${result.workspace.path}`,
+      ]);
+      refreshSummary();
+      return;
+    }
+
     if (command === "where") {
       appendSystem(formatWhereLog(touchWorkspace(db)));
       refreshSummary();
@@ -1153,7 +1210,7 @@ function startFullScreenTui(db) {
   }
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
-  appendSystem("Telegram examples: /where, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘");
+  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘");
   appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
   const intervalId = setInterval(pollWatchers, 1000);
@@ -1218,6 +1275,36 @@ async function runCommandMode(command) {
     return;
   }
 
+  if (command === "engine") {
+    const nextEngine = process.argv[3];
+
+    if (!nextEngine) {
+      const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
+      printMessage(`Current engine: ${workspace ? workspace.engine : DEFAULT_ENGINE}`);
+      printStatus(workspace);
+      db.close();
+      return;
+    }
+
+    const result = setWorkspaceEngine(db, nextEngine);
+
+    if (!result.ok) {
+      db.close();
+      console.error(`${result.error}. Allowed: gemini, codex, custom`);
+      process.exit(1);
+    }
+
+    printMessage(`Active engine changed to ${result.workspace.engine}.`);
+
+    if (result.replacedPath) {
+      printMessage(`Replaced previous workspace: ${result.replacedPath}`);
+    }
+
+    printStatus(result.workspace);
+    db.close();
+    return;
+  }
+
   if (command === "status") {
     const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
     printMessage(
@@ -1261,7 +1348,7 @@ async function runCommandMode(command) {
 
     if (workspace) {
       printStatus(workspace);
-      printMessage("Telegram examples: /where, /run <prompt>, /edit <prompt>");
+      printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>");
     } else {
       printMessage(
         "No active workspace is connected yet. Telegram commands that require a workspace will be rejected until you run `veremote connect`.",

@@ -19,6 +19,7 @@ const publicBaseUrl = process.env.PUBLIC_BASE_URL && process.env.PUBLIC_BASE_URL
 const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
 const workerPath = path.join(appRoot, "scripts", "run-job-worker.cjs");
 const logsDir = path.join(appRoot, "data", "logs");
+const ALLOWED_ENGINES = new Set(["gemini", "codex", "custom"]);
 
 if (!pollingEnabled) {
   console.error("TELEGRAM_POLLING_ENABLED is not true.");
@@ -254,6 +255,43 @@ function touchActiveWorkspace(db) {
   return getActiveWorkspace(db);
 }
 
+function setActiveWorkspaceEngine(db, engine) {
+  const normalized = String(engine || "").trim().toLowerCase();
+
+  if (!ALLOWED_ENGINES.has(normalized)) {
+    return {
+      ok: false,
+      error: `지원하지 않는 엔진입니다: ${engine}`,
+      workspace: getActiveWorkspace(db),
+    };
+  }
+
+  const workspace = getActiveWorkspace(db);
+
+  if (!workspace || !workspace.is_active) {
+    return {
+      ok: false,
+      error:
+        "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+      workspace: null,
+    };
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE active_workspace
+    SET
+      engine = ?,
+      last_heartbeat_at = ?
+    WHERE id = 'main'
+  `).run(normalized, now);
+
+  return {
+    ok: true,
+    workspace: getActiveWorkspace(db),
+  };
+}
+
 function markJobAsRunning(db, jobId, logPath) {
   const now = new Date().toISOString();
   db.prepare(`
@@ -396,7 +434,7 @@ function buildDaemonStartedText(workspace) {
     lines.push(`project: ${workspace.name}`);
     lines.push(`path: ${workspace.path}`);
     lines.push(`engine: ${workspace.engine}`);
-    lines.push("commands: /where, /run <prompt>, /edit <prompt>");
+    lines.push("commands: /where, /engine <name>, /run <prompt>, /edit <prompt>");
   } else {
     lines.push("workspace: none");
     lines.push("hint: run `veremote connect` locally first");
@@ -585,6 +623,7 @@ async function handleCommand(db, text) {
         "사용 가능한 명령:",
         "/help",
         "/where",
+        "/engine <name>",
         "/status",
         "/last",
         "/job <id>",
@@ -616,6 +655,51 @@ async function handleCommand(db, text) {
         `last active: ${formatTimestamp(workspace.last_heartbeat_at || workspace.connected_at)}`,
       ].join("\n"),
       resultText: "where sent",
+    };
+  }
+
+  if (command === "/engine") {
+    const requestedEngine = argsText.trim().toLowerCase();
+
+    if (!requestedEngine) {
+      const workspace = touchActiveWorkspace(db);
+
+      if (!workspace || !workspace.is_active) {
+        return {
+          replyText:
+            "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+          resultText: "engine empty without workspace",
+        };
+      }
+
+      return {
+        replyText: [
+          "현재 엔진:",
+          `project: ${workspace.name}`,
+          `engine: ${workspace.engine}`,
+          "변경 방법: /engine gemini | /engine codex | /engine custom",
+        ].join("\n"),
+        resultText: "engine current sent",
+      };
+    }
+
+    const result = setActiveWorkspaceEngine(db, requestedEngine);
+
+    if (!result.ok) {
+      return {
+        replyText: `${result.error}\n사용 가능: gemini, codex, custom`,
+        resultText: `engine change failed: ${requestedEngine}`,
+      };
+    }
+
+    return {
+      replyText: [
+        "엔진이 변경되었습니다.",
+        `project: ${result.workspace.name}`,
+        `path: ${result.workspace.path}`,
+        `engine: ${result.workspace.engine}`,
+      ].join("\n"),
+      resultText: `engine changed to ${result.workspace.engine}`,
     };
   }
 
