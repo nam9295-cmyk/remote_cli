@@ -13,6 +13,7 @@ loadLocalEnvFile();
 const DATABASE_PATH = path.join(APP_ROOT, "data", "remote-cli.sqlite");
 const WORKER_PATH = path.join(APP_ROOT, "scripts", "run-job-worker.cjs");
 const DAEMON_PATH = path.join(APP_ROOT, "scripts", "run-telegram-polling.cjs");
+const DAEMON_PID_PATH = path.join(APP_ROOT, "data", "veremote-daemon.pid");
 const LOGO_PATH = path.join(APP_ROOT, "assets", "logo.txt");
 const CURRENT_CWD = process.cwd();
 const DEFAULT_ENGINE = "gemini";
@@ -869,6 +870,61 @@ function runDaemonProcess() {
   });
 }
 
+function getRunningDaemonPid() {
+  try {
+    const value = fs.readFileSync(DAEMON_PID_PATH, "utf8").trim();
+
+    if (!value) {
+      return null;
+    }
+
+    const pid = Number(value);
+
+    if (!Number.isInteger(pid) || pid <= 0) {
+      fs.rmSync(DAEMON_PID_PATH, { force: true });
+      return null;
+    }
+
+    try {
+      process.kill(pid, 0);
+      return pid;
+    } catch {
+      fs.rmSync(DAEMON_PID_PATH, { force: true });
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function ensureBackgroundDaemonStarted() {
+  const existingPid = getRunningDaemonPid();
+
+  if (existingPid) {
+    return {
+      started: false,
+      pid: existingPid,
+    };
+  }
+
+  const child = spawn(process.execPath, [DAEMON_PATH], {
+    cwd: APP_ROOT,
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      VEREMOTE_APP_ROOT: APP_ROOT,
+    },
+  });
+
+  child.unref();
+
+  return {
+    started: true,
+    pid: child.pid,
+  };
+}
+
 function appendConversation(conversation, text) {
   const lines = Array.isArray(text) ? text : String(text).split(/\r?\n/);
 
@@ -1088,9 +1144,17 @@ function startFullScreenTui(db) {
     });
   }
 
+  const daemonResult = ensureBackgroundDaemonStarted();
+
+  if (daemonResult.started) {
+    appendSystem(`telegram daemon started in background (pid ${daemonResult.pid}).`);
+  } else if (daemonResult.pid) {
+    appendSystem(`telegram daemon already running (pid ${daemonResult.pid}).`);
+  }
+
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
   appendSystem("Telegram examples: /where, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘");
-  appendSystem("To receive telegram commands, run `veremote daemon` in another terminal.");
+  appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
   const intervalId = setInterval(pollWatchers, 1000);
 
@@ -1180,6 +1244,19 @@ async function runCommandMode(command) {
 
   if (command === "daemon") {
     const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
+    const existingPid = getRunningDaemonPid();
+
+    if (existingPid) {
+      printMessage(`veremote daemon is already running (pid ${existingPid}).`);
+
+      if (workspace) {
+        printStatus(workspace);
+      }
+
+      db.close();
+      return;
+    }
+
     printMessage("Starting veremote daemon for Telegram polling.");
 
     if (workspace) {

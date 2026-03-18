@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable @typescript-eslint/no-require-imports */
 
+const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
@@ -8,6 +9,7 @@ const { DatabaseSync } = require("node:sqlite");
 
 const appRoot = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
+const DAEMON_PID_PATH = path.join(appRoot, "data", "veremote-daemon.pid");
 const token = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim();
 const allowedChatId =
   process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
@@ -31,11 +33,11 @@ if (!token || !allowedChatId) {
 function loadLocalEnvFile() {
   const envPath = path.join(appRoot, ".env.local");
 
-  if (!fsExists(envPath)) {
+  if (!fs.existsSync(envPath)) {
     return;
   }
 
-  const content = require("node:fs").readFileSync(envPath, "utf8");
+  const content = fs.readFileSync(envPath, "utf8");
   const lines = content.split(/\r?\n/);
 
   for (const rawLine of lines) {
@@ -59,15 +61,6 @@ function loadLocalEnvFile() {
     }
 
     process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
-  }
-}
-
-function fsExists(targetPath) {
-  try {
-    require("node:fs").accessSync(targetPath);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -374,6 +367,42 @@ async function sendMessage(text) {
     text,
     disable_web_page_preview: true,
   });
+}
+
+function writeDaemonPidFile() {
+  fs.mkdirSync(path.dirname(DAEMON_PID_PATH), { recursive: true });
+  fs.writeFileSync(DAEMON_PID_PATH, `${process.pid}\n`, "utf8");
+}
+
+function removeDaemonPidFile() {
+  try {
+    const currentValue = fs.readFileSync(DAEMON_PID_PATH, "utf8").trim();
+    if (!currentValue || Number(currentValue) === process.pid) {
+      fs.rmSync(DAEMON_PID_PATH, { force: true });
+    }
+  } catch {
+    // Ignore cleanup errors.
+  }
+}
+
+function buildDaemonStartedText(workspace) {
+  const lines = [
+    "[veremote] telegram daemon connected",
+    `status: listening`,
+    `chat: ${allowedChatId}`,
+  ];
+
+  if (workspace && workspace.is_active) {
+    lines.push(`project: ${workspace.name}`);
+    lines.push(`path: ${workspace.path}`);
+    lines.push(`engine: ${workspace.engine}`);
+    lines.push("commands: /where, /run <prompt>, /edit <prompt>");
+  } else {
+    lines.push("workspace: none");
+    lines.push("hint: run `veremote connect` locally first");
+  }
+
+  return lines.join("\n");
 }
 
 function normalizeCommand(text) {
@@ -707,6 +736,20 @@ async function bootstrapTelegramPolling() {
   });
 
   const db = createDb();
+  writeDaemonPidFile();
+  const cleanup = () => {
+    removeDaemonPidFile();
+    db.close();
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
+  process.on("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
   console.log(`[telegram-polling] started. interval=${pollingIntervalMs}ms`);
   const workspace = getActiveWorkspace(db);
 
@@ -716,6 +759,12 @@ async function bootstrapTelegramPolling() {
     );
   } else {
     console.log("[telegram-polling] no active workspace connected yet.");
+  }
+
+  try {
+    await sendMessage(buildDaemonStartedText(workspace));
+  } catch (error) {
+    console.error("[telegram-polling] failed to send startup message", error);
   }
 
   while (true) {
@@ -793,6 +842,7 @@ async function bootstrapTelegramPolling() {
 }
 
 bootstrapTelegramPolling().catch((error) => {
+  removeDaemonPidFile();
   console.error(error);
   process.exit(1);
 });
