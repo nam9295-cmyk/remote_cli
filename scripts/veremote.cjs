@@ -12,6 +12,7 @@ const APP_ROOT = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
 const DATABASE_PATH = path.join(APP_ROOT, "data", "remote-cli.sqlite");
 const WORKER_PATH = path.join(APP_ROOT, "scripts", "run-job-worker.cjs");
+const DAEMON_PATH = path.join(APP_ROOT, "scripts", "run-telegram-polling.cjs");
 const LOGO_PATH = path.join(APP_ROOT, "assets", "logo.txt");
 const CURRENT_CWD = process.cwd();
 const DEFAULT_ENGINE = "gemini";
@@ -100,13 +101,16 @@ function ensureDb() {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
       prompt TEXT NOT NULL,
+      workspace_path TEXT,
       status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
       result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
       preview_image_path TEXT,
       log_path TEXT,
       error_message TEXT
@@ -123,6 +127,20 @@ function ensureDb() {
       chat_id TEXT
     );
   `);
+
+  const migrationStatements = [
+    "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
+    "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
+    "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+  ];
+
+  for (const statement of migrationStatements) {
+    try {
+      db.exec(statement);
+    } catch {
+      // Column already exists.
+    }
+  }
 
   return db;
 }
@@ -310,28 +328,34 @@ function createJob(db, input) {
       id,
       title,
       engine,
+      mode,
       prompt,
+      workspace_path,
       status,
       created_at,
       updated_at,
       started_at,
       finished_at,
       result_summary,
+      changed_files_json,
       preview_image_path,
       log_path,
       error_message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     jobId,
     `${titlePrefix}: ${clippedPrompt}`,
     engine,
+    input.mode,
     promptWithMode,
+    input.workspacePath || null,
     "queued",
     now,
     now,
     null,
     null,
     "작업이 생성되었습니다. 실행 전까지는 queued 상태로 유지됩니다.",
+    "[]",
     null,
     null,
     null,
@@ -340,6 +364,7 @@ function createJob(db, input) {
   return {
     id: jobId,
     engine,
+    mode: input.mode,
     title: `${titlePrefix}: ${clippedPrompt}`,
   };
 }
@@ -395,11 +420,13 @@ function getJobSnapshot(db, jobId) {
         SELECT
           id,
           title,
+          mode,
           status,
           engine,
           log_path,
           result_summary,
-          error_message
+          error_message,
+          changed_files_json
         FROM jobs
         WHERE id = ?
       `)
@@ -435,6 +462,7 @@ function queueJob(db, mode, prompt) {
     mode,
     engine: workspace.engine,
     prompt,
+    workspacePath: workspace.path,
   });
   const logPath = createLogPath(job.id);
 
@@ -592,6 +620,7 @@ function printUsage() {
   console.log("veremote connect");
   console.log("veremote status");
   console.log("veremote disconnect");
+  console.log("veremote daemon");
   console.log("");
 }
 
@@ -810,9 +839,34 @@ function buildHelpText() {
   lines.push("tips");
   lines.push("status / where append details to the log panel");
   lines.push("run / edit create background jobs immediately");
+  lines.push("telegram examples: /where /run ... /edit ...");
+  lines.push("run `veremote daemon` in another terminal to receive telegram commands");
   lines.push("the prompt stays pinned to the bottom");
 
   return lines.join("\n");
+}
+
+function runDaemonProcess() {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [DAEMON_PATH], {
+      cwd: APP_ROOT,
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        VEREMOTE_APP_ROOT: APP_ROOT,
+      },
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0 || code === null) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Daemon exited with code ${code}.`));
+    });
+  });
 }
 
 function appendConversation(conversation, text) {
@@ -1035,6 +1089,8 @@ function startFullScreenTui(db) {
   }
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
+  appendSystem("Telegram examples: /where, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘");
+  appendSystem("To receive telegram commands, run `veremote daemon` in another terminal.");
 
   const intervalId = setInterval(pollWatchers, 1000);
 
@@ -1119,6 +1175,24 @@ async function runCommandMode(command) {
     );
     printStatus(null);
     db.close();
+    return;
+  }
+
+  if (command === "daemon") {
+    const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
+    printMessage("Starting veremote daemon for Telegram polling.");
+
+    if (workspace) {
+      printStatus(workspace);
+      printMessage("Telegram examples: /where, /run <prompt>, /edit <prompt>");
+    } else {
+      printMessage(
+        "No active workspace is connected yet. Telegram commands that require a workspace will be rejected until you run `veremote connect`.",
+      );
+    }
+
+    db.close();
+    await runDaemonProcess();
     return;
   }
 

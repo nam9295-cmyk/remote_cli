@@ -2,19 +2,22 @@ import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
-import type { EngineId, Job, JobStatus } from "@/lib/types";
+import type { EngineId, Job, JobMode, JobStatus } from "@/lib/types";
 
 type JobRow = {
   id: string;
   title: string;
   engine: EngineId;
+  mode: JobMode;
   prompt: string;
+  workspace_path: string | null;
   status: JobStatus;
   created_at: string;
   updated_at: string;
   started_at: string | null;
   finished_at: string | null;
   result_summary: string | null;
+  changed_files_json: string | null;
   preview_image_path: string | null;
   log_path: string | null;
   error_message: string | null;
@@ -23,23 +26,36 @@ type JobRow = {
 export interface CreateJobInput {
   title: string;
   engine: EngineId;
+  mode?: JobMode;
   prompt: string;
+  workspacePath?: string | null;
 }
 
 const LOGS_DIR = path.join(process.cwd(), "data", "logs");
 
 function mapJob(row: JobRow): Job {
+  let changedFiles: string[] = [];
+
+  try {
+    changedFiles = row.changed_files_json ? JSON.parse(row.changed_files_json) : [];
+  } catch {
+    changedFiles = [];
+  }
+
   return {
     id: row.id,
     title: row.title,
     engine: row.engine,
+    mode: row.mode,
     prompt: row.prompt,
+    workspacePath: row.workspace_path,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     resultSummary: row.result_summary,
+    changedFiles,
     previewImagePath: row.preview_image_path,
     logPath: row.log_path,
     errorMessage: row.error_message,
@@ -88,13 +104,16 @@ export function createJob(input: CreateJobInput) {
     id: `job_${randomUUID()}`,
     title: input.title,
     engine: input.engine,
+    mode: input.mode ?? "run",
     prompt: input.prompt,
+    workspacePath: input.workspacePath ?? null,
     status: "queued",
     createdAt: now,
     updatedAt: now,
     startedAt: null,
     finishedAt: null,
     resultSummary: "작업이 생성되었습니다. 실행 전까지는 queued 상태로 유지됩니다.",
+    changedFiles: [],
     previewImagePath: null,
     logPath: null,
     errorMessage: null,
@@ -105,28 +124,34 @@ export function createJob(input: CreateJobInput) {
       id,
       title,
       engine,
+      mode,
       prompt,
+      workspace_path,
       status,
       created_at,
       updated_at,
       started_at,
       finished_at,
       result_summary,
+      changed_files_json,
       preview_image_path,
       log_path,
       error_message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     job.id,
     job.title,
     job.engine,
+    job.mode,
     job.prompt,
+    job.workspacePath,
     job.status,
     job.createdAt,
     job.updatedAt,
     job.startedAt,
     job.finishedAt,
     job.resultSummary,
+    JSON.stringify(job.changedFiles),
     job.previewImagePath,
     job.logPath,
     job.errorMessage,

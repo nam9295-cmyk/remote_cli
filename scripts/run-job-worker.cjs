@@ -73,6 +73,25 @@ function getEngineConfig(engineId) {
 function openDb() {
   const db = new DatabaseSync(databasePath);
   db.exec(`
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
+      prompt TEXT NOT NULL,
+      workspace_path TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      preview_image_path TEXT,
+      log_path TEXT,
+      error_message TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS notification_logs (
       id TEXT PRIMARY KEY,
       job_id TEXT NOT NULL,
@@ -83,6 +102,21 @@ function openDb() {
       error_message TEXT
     );
   `);
+
+  const migrationStatements = [
+    "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
+    "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
+    "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+  ];
+
+  for (const statement of migrationStatements) {
+    try {
+      db.exec(statement);
+    } catch {
+      // Column already exists.
+    }
+  }
+
   return db;
 }
 
@@ -90,7 +124,7 @@ function getJob(db) {
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
 }
 
-function updateSuccess(db, logPath, summary) {
+function updateSuccess(db, logPath, summary, changedFiles) {
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE jobs
@@ -99,13 +133,14 @@ function updateSuccess(db, logPath, summary) {
       updated_at = ?,
       finished_at = ?,
       result_summary = ?,
+      changed_files_json = ?,
       log_path = ?,
       error_message = NULL
     WHERE id = ?
-  `).run(now, now, summary, logPath, jobId);
+  `).run(now, now, summary, JSON.stringify(changedFiles || []), logPath, jobId);
 }
 
-function updateFailure(db, logPath, message) {
+function updateFailure(db, logPath, message, changedFiles) {
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE jobs
@@ -114,10 +149,19 @@ function updateFailure(db, logPath, message) {
       updated_at = ?,
       finished_at = ?,
       result_summary = ?,
+      changed_files_json = ?,
       log_path = COALESCE(?, log_path),
       error_message = ?
     WHERE id = ?
-  `).run(now, now, "작업 실행 중 오류가 발생했습니다.", logPath, message, jobId);
+  `).run(
+    now,
+    now,
+    "작업 실행 중 오류가 발생했습니다.",
+    JSON.stringify(changedFiles || []),
+    logPath,
+    message,
+    jobId,
+  );
 }
 
 function appendLine(stream, line) {
@@ -125,21 +169,103 @@ function appendLine(stream, line) {
 }
 
 function mapJob(row) {
+  let changedFiles = [];
+
+  try {
+    changedFiles = row.changed_files_json ? JSON.parse(row.changed_files_json) : [];
+  } catch {
+    changedFiles = [];
+  }
+
   return {
     id: row.id,
     title: row.title,
     engine: row.engine,
+    mode: row.mode || "run",
     prompt: row.prompt,
+    workspacePath: row.workspace_path || null,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     resultSummary: row.result_summary,
+    changedFiles,
     previewImagePath: row.preview_image_path,
     logPath: row.log_path,
     errorMessage: row.error_message,
   };
+}
+
+function shouldIgnoreWorkspaceEntry(relativePath) {
+  return (
+    relativePath === ".git" ||
+    relativePath === ".next" ||
+    relativePath === "node_modules" ||
+    relativePath === "data" ||
+    relativePath.startsWith(".git/") ||
+    relativePath.startsWith(".next/") ||
+    relativePath.startsWith("node_modules/") ||
+    relativePath.startsWith("data/")
+  );
+}
+
+function snapshotWorkspace(rootPath) {
+  const snapshot = new Map();
+
+  function visit(currentPath) {
+    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(rootPath, absolutePath).split(path.sep).join("/");
+
+      if (!relativePath || shouldIgnoreWorkspaceEntry(relativePath)) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        visit(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      const stats = fs.statSync(absolutePath);
+      snapshot.set(relativePath, `${stats.size}:${stats.mtimeMs}`);
+    }
+  }
+
+  visit(rootPath);
+  return snapshot;
+}
+
+function diffWorkspaceSnapshots(before, after) {
+  const changed = [];
+  const allPaths = new Set([...before.keys(), ...after.keys()]);
+
+  for (const relativePath of [...allPaths].sort()) {
+    const previous = before.get(relativePath);
+    const next = after.get(relativePath);
+
+    if (!previous && next) {
+      changed.push(`created:${relativePath}`);
+      continue;
+    }
+
+    if (previous && !next) {
+      changed.push(`deleted:${relativePath}`);
+      continue;
+    }
+
+    if (previous !== next) {
+      changed.push(`modified:${relativePath}`);
+    }
+  }
+
+  return changed;
 }
 
 function insertNotificationLog(db, input) {
@@ -184,6 +310,13 @@ function buildTelegramText(job) {
 
   if (job.status === "success" && job.resultSummary) {
     lines.push(`요약: ${job.resultSummary}`);
+  }
+
+  if (job.mode === "edit") {
+    const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles : [];
+    lines.push(
+      `변경 파일: ${changedFiles.length > 0 ? changedFiles.join(", ") : "없음"}`,
+    );
   }
 
   if (job.status === "failed" && job.errorMessage) {
@@ -263,7 +396,7 @@ async function main() {
   const engine = getEngineConfig(job.engine);
 
   if (!engine) {
-    updateFailure(db, job.log_path, `Unsupported engine: ${job.engine}`);
+    updateFailure(db, job.log_path, `Unsupported engine: ${job.engine}`, []);
     process.exit(1);
   }
 
@@ -271,10 +404,15 @@ async function main() {
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const logStream = fs.createWriteStream(logPath, { flags: "a" });
   appendLine(logStream, `[${new Date().toISOString()}] starting ${job.engine} runner`);
+  const workspaceSnapshotBefore =
+    job.mode === "edit" ? snapshotWorkspace(workspacePath) : new Map();
 
   const child = spawn(engine.command, engine.buildArgs(job.prompt), {
     cwd: workspacePath,
-    env: process.env,
+    env: {
+      ...process.env,
+      VEREMOTE_JOB_MODE: job.mode || "run",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -290,7 +428,11 @@ async function main() {
     }
 
     settled = true;
-    updateFailure(db, logPath, message);
+    const changedFiles =
+      job.mode === "edit"
+        ? diffWorkspaceSnapshots(workspaceSnapshotBefore, snapshotWorkspace(workspacePath))
+        : [];
+    updateFailure(db, logPath, message, changedFiles);
     const failedJob = mapJob(getJob(db));
     sendTelegramNotification(failedJob)
       .then((result) => {
@@ -315,7 +457,14 @@ async function main() {
 
     settled = true;
     appendLine(logStream, `[worker] process completed with exit code ${code}`);
-    updateSuccess(db, logPath, summary);
+    const changedFiles =
+      job.mode === "edit"
+        ? diffWorkspaceSnapshots(workspaceSnapshotBefore, snapshotWorkspace(workspacePath))
+        : [];
+    if (changedFiles.length > 0) {
+      appendLine(logStream, `[worker] changed files: ${changedFiles.join(", ")}`);
+    }
+    updateSuccess(db, logPath, summary, changedFiles);
     const successfulJob = mapJob(getJob(db));
     sendTelegramNotification(successfulJob)
       .then((result) => {
@@ -382,7 +531,7 @@ async function main() {
 main().catch((error) => {
   const db = openDb();
   const message = error instanceof Error ? error.message : String(error);
-  updateFailure(db, null, message);
+  updateFailure(db, null, message, []);
   db.close();
   process.exit(1);
 });

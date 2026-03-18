@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "telegram:poll": "node --env-file=.env.local scripts/run-telegram-polling.cjs",
+    "telegram:poll": "node scripts/veremote.cjs daemon",
     "veremote": "node scripts/veremote.cjs"
   },
   "dependencies": {

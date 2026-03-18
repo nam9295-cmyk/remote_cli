@@ -1,6 +1,7 @@
 export type JobStatus = "queued" | "running" | "success" | "failed";
 export type NotificationChannelType = "telegram";
 export type NotificationStatus = "sent" | "failed";
+export type JobMode = "run" | "edit";
 
 export type EngineId = "gemini" | "codex" | "custom";
 
@@ -15,13 +16,16 @@ export interface Job {
   id: string;
   title: string;
   engine: EngineId;
+  mode: JobMode;
   prompt: string;
+  workspacePath: string | null;
   status: JobStatus;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
   resultSummary: string | null;
+  changedFiles: string[];
   previewImagePath: string | null;
   logPath: string | null;
   errorMessage: string | null;

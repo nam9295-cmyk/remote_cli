@@ -17,17 +17,20 @@ function seedJobs(db: DatabaseSync) {
       id,
       title,
       engine,
+      mode,
       prompt,
+      workspace_path,
       status,
       created_at,
       updated_at,
       started_at,
       finished_at,
       result_summary,
+      changed_files_json,
       preview_image_path,
       log_path,
       error_message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   db.exec("BEGIN");
@@ -38,13 +41,16 @@ function seedJobs(db: DatabaseSync) {
         job.id,
         job.title,
         job.engine,
+        "run",
         job.prompt,
+        null,
         job.status,
         job.createdAt,
         job.updatedAt,
         job.startedAt,
         job.finishedAt,
         job.resultSummary,
+        JSON.stringify([]),
         job.previewImagePath,
         job.logPath,
         job.errorMessage,
@@ -58,6 +64,22 @@ function seedJobs(db: DatabaseSync) {
   }
 }
 
+function ensureJobColumns(db: DatabaseSync) {
+  const statements = [
+    "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
+    "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
+    "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+  ];
+
+  for (const statement of statements) {
+    try {
+      db.exec(statement);
+    } catch {
+      // Column already exists.
+    }
+  }
+}
+
 function initializeDatabase(db: DatabaseSync) {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -67,13 +89,16 @@ function initializeDatabase(db: DatabaseSync) {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
       prompt TEXT NOT NULL,
+      workspace_path TEXT,
       status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
       result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
       preview_image_path TEXT,
       log_path TEXT,
       error_message TEXT
@@ -112,6 +137,8 @@ function initializeDatabase(db: DatabaseSync) {
     CREATE INDEX IF NOT EXISTS jobs_updated_at_idx ON jobs(updated_at DESC);
     CREATE INDEX IF NOT EXISTS notification_logs_job_id_idx ON notification_logs(job_id, sent_at DESC);
   `);
+
+  ensureJobColumns(db);
 
   db.prepare(`
     INSERT INTO telegram_polling_state (

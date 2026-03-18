@@ -28,6 +28,12 @@ function buildTelegramText(job: Job) {
     lines.push(`요약: ${job.resultSummary}`);
   }
 
+  if (job.mode === "edit") {
+    lines.push(
+      `변경 파일: ${job.changedFiles.length > 0 ? job.changedFiles.join(", ") : "없음"}`,
+    );
+  }
+
   if (job.status === "failed" && job.errorMessage) {
     lines.push(`에러: ${job.errorMessage}`);
   }

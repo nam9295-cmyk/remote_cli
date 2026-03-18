@@ -6,15 +6,17 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 
+const appRoot = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
+loadLocalEnvFile();
 const token = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim();
 const allowedChatId =
   process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
 const pollingEnabled = process.env.TELEGRAM_POLLING_ENABLED === "true";
 const pollingIntervalMs = Number(process.env.TELEGRAM_POLLING_INTERVAL_MS || "3000");
 const publicBaseUrl = process.env.PUBLIC_BASE_URL && process.env.PUBLIC_BASE_URL.trim();
-const databasePath = path.join(process.cwd(), "data", "remote-cli.sqlite");
-const workerPath = path.join(process.cwd(), "scripts", "run-job-worker.cjs");
-const logsDir = path.join(process.cwd(), "data", "logs");
+const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
+const workerPath = path.join(appRoot, "scripts", "run-job-worker.cjs");
+const logsDir = path.join(appRoot, "data", "logs");
 
 if (!pollingEnabled) {
   console.error("TELEGRAM_POLLING_ENABLED is not true.");
@@ -24,6 +26,49 @@ if (!pollingEnabled) {
 if (!token || !allowedChatId) {
   console.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.");
   process.exit(1);
+}
+
+function loadLocalEnvFile() {
+  const envPath = path.join(appRoot, ".env.local");
+
+  if (!fsExists(envPath)) {
+    return;
+  }
+
+  const content = require("node:fs").readFileSync(envPath, "utf8");
+  const lines = content.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const separatorIndex = line.indexOf("=");
+
+    if (separatorIndex === -1) {
+      continue;
+    }
+
+    const key = line.slice(0, separatorIndex).trim();
+    const rawValue = line.slice(separatorIndex + 1).trim();
+
+    if (!key || process.env[key]) {
+      continue;
+    }
+
+    process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
+  }
+}
+
+function fsExists(targetPath) {
+  try {
+    require("node:fs").accessSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms) {
@@ -37,13 +82,16 @@ function createDb() {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
       prompt TEXT NOT NULL,
+      workspace_path TEXT,
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
       result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
       preview_image_path TEXT,
       log_path TEXT,
       error_message TEXT
@@ -57,6 +105,17 @@ function createDb() {
       last_result_text TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS active_workspace (
+      id TEXT PRIMARY KEY,
+      path TEXT NOT NULL,
+      name TEXT NOT NULL,
+      engine TEXT NOT NULL CHECK (engine IN ('gemini', 'codex', 'custom')),
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+      connected_at TEXT NOT NULL,
+      last_heartbeat_at TEXT,
+      chat_id TEXT
+    );
+
     INSERT INTO telegram_polling_state (
       id,
       last_update_id,
@@ -67,6 +126,20 @@ function createDb() {
     VALUES ('main', 0, NULL, NULL, NULL)
     ON CONFLICT(id) DO NOTHING;
   `);
+
+  const migrationStatements = [
+    "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
+    "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
+    "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+  ];
+
+  for (const statement of migrationStatements) {
+    try {
+      db.exec(statement);
+    } catch {
+      // Column already exists.
+    }
+  }
   return db;
 }
 
@@ -130,34 +203,62 @@ function createJob(db, input) {
       id,
       title,
       engine,
+      mode,
       prompt,
+      workspace_path,
       status,
       created_at,
       updated_at,
       started_at,
       finished_at,
       result_summary,
+      changed_files_json,
       preview_image_path,
       log_path,
       error_message
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     job.id,
     job.title,
     job.engine,
+    input.mode || "run",
     job.prompt,
+    input.workspacePath || null,
     job.status,
     job.createdAt,
     job.updatedAt,
     job.startedAt,
     job.finishedAt,
     job.resultSummary,
+    "[]",
     job.previewImagePath,
     job.logPath,
     job.errorMessage,
   );
 
   return job;
+}
+
+function getActiveWorkspace(db) {
+  return db.prepare("SELECT * FROM active_workspace WHERE id = 'main'").get();
+}
+
+function touchActiveWorkspace(db) {
+  const workspace = getActiveWorkspace(db);
+
+  if (!workspace) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE active_workspace
+    SET
+      last_heartbeat_at = ?
+    WHERE id = 'main'
+  `).run(now);
+
+  return getActiveWorkspace(db);
 }
 
 function markJobAsRunning(db, jobId, logPath) {
@@ -204,11 +305,16 @@ function markJobAsFailed(db, jobId, logPath, message) {
   );
 }
 
-function launchJobRunner(jobId) {
+function launchJobRunner(jobId, workspacePath) {
   const child = spawn(process.execPath, [workerPath, jobId], {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    cwd: workspacePath,
+    env: {
+      ...process.env,
+      VEREMOTE_APP_ROOT: appRoot,
+      VEREMOTE_WORKSPACE_PATH: workspacePath,
+    },
   });
   child.unref();
 }
@@ -281,6 +387,21 @@ function truncate(value, length) {
   return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
 }
 
+function formatTimestamp(value) {
+  if (!value) {
+    return "-";
+  }
+
+  try {
+    return new Intl.DateTimeFormat("ko-KR", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
 async function handleCommand(db, text) {
   const { command, argsText, rawText } = normalizeCommand(text);
 
@@ -293,12 +414,38 @@ async function handleCommand(db, text) {
       replyText: [
         "사용 가능한 명령:",
         "/help",
+        "/where",
         "/status",
         "/last",
         "/job <id>",
-        "/run gemini <prompt>",
+        "/run <prompt>",
+        "/edit <prompt>",
       ].join("\n"),
       resultText: "help sent",
+    };
+  }
+
+  if (command === "/where") {
+    const workspace = touchActiveWorkspace(db);
+
+    if (!workspace || !workspace.is_active) {
+      return {
+        replyText:
+          "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+        resultText: "where empty",
+      };
+    }
+
+    return {
+      replyText: [
+        "현재 active workspace:",
+        `project: ${workspace.name}`,
+        `path: ${workspace.path}`,
+        `engine: ${workspace.engine}`,
+        `status: ${workspace.is_active ? "active" : "inactive"}`,
+        `last active: ${formatTimestamp(workspace.last_heartbeat_at || workspace.connected_at)}`,
+      ].join("\n"),
+      resultText: "where sent",
     };
   }
 
@@ -329,6 +476,21 @@ async function handleCommand(db, text) {
       `engine: ${job.engine}`,
       `summary: ${job.result_summary || "-"}`,
     ];
+
+    if (job.mode) {
+      lines.push(`mode: ${job.mode}`);
+    }
+
+    if (job.changed_files_json) {
+      try {
+        const changedFiles = JSON.parse(job.changed_files_json);
+        if (Array.isArray(changedFiles) && changedFiles.length > 0) {
+          lines.push(`changed: ${changedFiles.join(", ")}`);
+        }
+      } catch {
+        // Ignore malformed stored data.
+      }
+    }
 
     if (detailUrl) {
       lines.push(`detail: ${detailUrl}`);
@@ -368,6 +530,21 @@ async function handleCommand(db, text) {
       `summary: ${job.result_summary || "-"}`,
     ];
 
+    if (job.mode) {
+      lines.push(`mode: ${job.mode}`);
+    }
+
+    if (job.changed_files_json) {
+      try {
+        const changedFiles = JSON.parse(job.changed_files_json);
+        if (Array.isArray(changedFiles) && changedFiles.length > 0) {
+          lines.push(`changed: ${changedFiles.join(", ")}`);
+        }
+      } catch {
+        // Ignore malformed stored data.
+      }
+    }
+
     if (detailUrl) {
       lines.push(`detail: ${detailUrl}`);
     }
@@ -379,26 +556,41 @@ async function handleCommand(db, text) {
   }
 
   if (command === "/run") {
-    const [engine, ...promptParts] = argsText.split(/\s+/);
-    const prompt = promptParts.join(" ").trim();
+    const prompt = argsText.trim();
 
-    if (engine !== "gemini" || !prompt) {
+    if (!prompt) {
       return {
-        replyText: "사용법: /run gemini <prompt>",
+        replyText: "사용법: /run <prompt>",
         resultText: "run usage sent",
+      };
+    }
+
+    const workspace = touchActiveWorkspace(db);
+
+    if (!workspace || !workspace.is_active) {
+      return {
+        replyText:
+          "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+        resultText: "run blocked without workspace",
       };
     }
 
     const title = `Telegram run — ${truncate(prompt, 28)}`;
     const job = createJob(db, {
       title,
-      engine: "gemini",
-      prompt,
+      engine: workspace.engine,
+      mode: "run",
+      prompt: [
+        "Run mode. Focus on analysis or execution without changing files unless the prompt explicitly requires it.",
+        "",
+        prompt,
+      ].join("\n"),
+      workspacePath: workspace.path,
     });
     const logPath = createLogPath(job.id);
     try {
       markJobAsRunning(db, job.id, logPath);
-      launchJobRunner(job.id);
+      launchJobRunner(job.id, workspace.path);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Telegram run launch failed.";
@@ -414,7 +606,8 @@ async function handleCommand(db, text) {
       "작업이 생성되고 바로 실행을 시작했습니다.",
       `id: ${job.id}`,
       `title: ${job.title}`,
-      "engine: gemini",
+      `engine: ${workspace.engine}`,
+      `workspace: ${workspace.name}`,
     ];
 
     if (detailUrl) {
@@ -424,6 +617,81 @@ async function handleCommand(db, text) {
     return {
       replyText: lines.join("\n"),
       resultText: `run launched for ${job.id}`,
+    };
+  }
+
+  if (command === "/edit") {
+    const prompt = argsText.trim();
+
+    if (!prompt) {
+      return {
+        replyText: "사용법: /edit <prompt>",
+        resultText: "edit usage sent",
+      };
+    }
+
+    if (prompt.length < 8) {
+      return {
+        replyText:
+          "프롬프트가 너무 짧습니다.\n어떤 파일을 어떻게 바꾸고 싶은지 조금 더 구체적으로 적어주세요.",
+        resultText: "edit prompt too short",
+      };
+    }
+
+    const workspace = touchActiveWorkspace(db);
+
+    if (!workspace || !workspace.is_active) {
+      return {
+        replyText:
+          "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+        resultText: "edit blocked without workspace",
+      };
+    }
+
+    const title = `Telegram edit — ${truncate(prompt, 27)}`;
+    const job = createJob(db, {
+      title,
+      engine: workspace.engine,
+      mode: "edit",
+      prompt: [
+        "Edit mode. You may modify files when needed.",
+        "반드시 변경 파일 목록과 수정 요약을 남겨주세요.",
+        "",
+        prompt,
+      ].join("\n"),
+      workspacePath: workspace.path,
+    });
+    const logPath = createLogPath(job.id);
+    try {
+      markJobAsRunning(db, job.id, logPath);
+      launchJobRunner(job.id, workspace.path);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Telegram edit launch failed.";
+      markJobAsFailed(db, job.id, logPath, message);
+      return {
+        replyText: `수정 작업을 시작하지 못했습니다.\nerror: ${message}`,
+        resultText: `edit failed for ${job.id}`,
+      };
+    }
+
+    const detailUrl = getJobUrl(job.id);
+    const lines = [
+      "수정 작업이 생성되고 바로 실행을 시작했습니다.",
+      `id: ${job.id}`,
+      `title: ${job.title}`,
+      `engine: ${workspace.engine}`,
+      `workspace: ${workspace.name}`,
+      "mode: edit",
+    ];
+
+    if (detailUrl) {
+      lines.push(`detail: ${detailUrl}`);
+    }
+
+    return {
+      replyText: lines.join("\n"),
+      resultText: `edit launched for ${job.id}`,
     };
   }
 
@@ -440,6 +708,15 @@ async function bootstrapTelegramPolling() {
 
   const db = createDb();
   console.log(`[telegram-polling] started. interval=${pollingIntervalMs}ms`);
+  const workspace = getActiveWorkspace(db);
+
+  if (workspace && workspace.is_active) {
+    console.log(
+      `[telegram-polling] active workspace=${workspace.name} (${workspace.path}) engine=${workspace.engine}`,
+    );
+  } else {
+    console.log("[telegram-polling] no active workspace connected yet.");
+  }
 
   while (true) {
     try {
