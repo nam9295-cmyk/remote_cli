@@ -47,6 +47,12 @@ export default function SettingsPage() {
                 </div>
               ))}
             </div>
+            <div className="mt-5 rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--surface-strong)] px-4 py-4 text-sm leading-6 text-[color:var(--muted)]">
+              실제 CLI를 붙이려면 `.env.local`에 예시처럼 넣으면 됩니다.
+              `GEMINI_CLI_COMMAND=gemini`
+              `CODEX_CLI_COMMAND=codex`
+              또는 `npx @google/gemini-cli`, `npx @openai/codex` 같은 형식도 가능합니다.
+            </div>
           </div>
 
           <div className="rounded-[32px] border border-[color:var(--line)] bg-[color:var(--surface)] p-6 shadow-sm">

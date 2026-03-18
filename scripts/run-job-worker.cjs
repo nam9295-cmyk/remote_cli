@@ -15,29 +15,51 @@ if (!jobId) {
   process.exit(1);
 }
 
+function splitCommandString(command) {
+  const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return parts.map((part) => part.replace(/^["']|["']$/g, ""));
+}
+
+function resolveRuntimeCommand(commandFromEnv) {
+  if (!commandFromEnv || !commandFromEnv.trim()) {
+    return null;
+  }
+
+  const [command, ...baseArgs] = splitCommandString(commandFromEnv.trim());
+
+  if (!command) {
+    return null;
+  }
+
+  return { command, baseArgs };
+}
+
 function getEngineConfig(engineId) {
+  const geminiRuntimeCommand = resolveRuntimeCommand(process.env.GEMINI_CLI_COMMAND);
+  const codexRuntimeCommand = resolveRuntimeCommand(process.env.CODEX_CLI_COMMAND);
+  const customRuntimeCommand = resolveRuntimeCommand(process.env.CUSTOM_CLI_COMMAND);
   const configs = {
     gemini: {
-      command: process.env.GEMINI_CLI_COMMAND || process.execPath,
+      command: (geminiRuntimeCommand && geminiRuntimeCommand.command) || process.execPath,
       buildArgs(prompt) {
-        return process.env.GEMINI_CLI_COMMAND
-          ? [jobId, prompt]
+        return geminiRuntimeCommand
+          ? [...geminiRuntimeCommand.baseArgs, "-p", prompt]
           : [mockEngineScriptPath, "gemini", jobId, prompt];
       },
     },
     codex: {
-      command: process.env.CODEX_CLI_COMMAND || process.execPath,
+      command: (codexRuntimeCommand && codexRuntimeCommand.command) || process.execPath,
       buildArgs(prompt) {
-        return process.env.CODEX_CLI_COMMAND
-          ? [jobId, prompt]
+        return codexRuntimeCommand
+          ? [...codexRuntimeCommand.baseArgs, "exec", "--full-auto", prompt]
           : [mockEngineScriptPath, "codex", jobId, prompt];
       },
     },
     custom: {
-      command: process.env.CUSTOM_CLI_COMMAND || process.execPath,
+      command: (customRuntimeCommand && customRuntimeCommand.command) || process.execPath,
       buildArgs(prompt) {
-        return process.env.CUSTOM_CLI_COMMAND
-          ? [jobId, prompt]
+        return customRuntimeCommand
+          ? [...customRuntimeCommand.baseArgs, jobId, prompt]
           : [mockEngineScriptPath, "custom", jobId, prompt];
       },
     },
@@ -253,6 +275,8 @@ async function main() {
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+
+  appendLine(logStream, `[worker] command: ${engine.command} ${engine.buildArgs(job.prompt).join(" ")}`);
 
   let lastStdoutLine = "";
   let stderrLines = [];
