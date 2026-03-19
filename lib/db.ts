@@ -80,6 +80,14 @@ function ensureJobColumns(db: DatabaseSync) {
   }
 }
 
+function getJobsTableSql(db: DatabaseSync) {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'")
+    .get() as { sql: string | null } | undefined;
+
+  return row?.sql ?? null;
+}
+
 function initializeDatabase(db: DatabaseSync) {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -92,7 +100,7 @@ function initializeDatabase(db: DatabaseSync) {
       mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
       prompt TEXT NOT NULL,
       workspace_path TEXT,
-      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed')),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed', 'partial', 'export_failed')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
@@ -139,6 +147,48 @@ function initializeDatabase(db: DatabaseSync) {
   `);
 
   ensureJobColumns(db);
+
+  const jobsTableSql = getJobsTableSql(db);
+
+  if (jobsTableSql && !jobsTableSql.includes("export_failed")) {
+    db.exec(`
+      PRAGMA foreign_keys = OFF;
+
+      ALTER TABLE jobs RENAME TO jobs_old;
+
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
+        prompt TEXT NOT NULL,
+        workspace_path TEXT,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed', 'partial', 'export_failed')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        result_summary TEXT,
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        preview_image_path TEXT,
+        log_path TEXT,
+        error_message TEXT
+      );
+
+      INSERT INTO jobs (
+        id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+        started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+      )
+      SELECT
+        id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+        started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+      FROM jobs_old;
+
+      DROP TABLE jobs_old;
+
+      PRAGMA foreign_keys = ON;
+    `);
+  }
 
   db.prepare(`
     INSERT INTO telegram_polling_state (

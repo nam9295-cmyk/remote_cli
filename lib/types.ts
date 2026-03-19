@@ -1,4 +1,10 @@
-export type JobStatus = "queued" | "running" | "success" | "failed";
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "success"
+  | "failed"
+  | "partial"
+  | "export_failed";
 export type NotificationChannelType = "telegram";
 export type NotificationStatus = "sent" | "failed";
 export type JobMode = "run" | "edit";

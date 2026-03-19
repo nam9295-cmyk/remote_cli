@@ -20,6 +20,16 @@ const STATUS_THEME: Record<
     className: "bg-emerald-100 text-emerald-900 ring-emerald-200",
     dotClassName: "bg-emerald-500",
   },
+  partial: {
+    label: "Partial",
+    className: "bg-violet-100 text-violet-900 ring-violet-200",
+    dotClassName: "bg-violet-500",
+  },
+  export_failed: {
+    label: "Export Failed",
+    className: "bg-orange-100 text-orange-900 ring-orange-200",
+    dotClassName: "bg-orange-500",
+  },
   failed: {
     label: "Failed",
     className: "bg-rose-100 text-rose-900 ring-rose-200",

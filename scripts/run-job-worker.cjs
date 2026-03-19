@@ -14,6 +14,7 @@ const appRoot = process.env.VEREMOTE_APP_ROOT || process.cwd();
 const workspacePath = process.env.VEREMOTE_WORKSPACE_PATH || process.cwd();
 const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
 const mockEngineScriptPath = path.join(appRoot, "scripts", "mock-engine.cjs");
+const FAILURE_LIKE_STATUSES = new Set(["failed", "partial", "export_failed"]);
 
 if (!jobId) {
   process.exit(1);
@@ -77,6 +78,56 @@ function getEngineConfig(engineId) {
   return configs[engineId];
 }
 
+function getJobsTableSql(db) {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'")
+    .get();
+
+  return row ? row.sql : null;
+}
+
+function ensureExtendedJobStatuses(db) {
+  const jobsTableSql = getJobsTableSql(db);
+
+  if (!jobsTableSql || jobsTableSql.includes("export_failed")) {
+    return;
+  }
+
+  db.exec(`
+    ALTER TABLE jobs RENAME TO jobs_old;
+
+    CREATE TABLE jobs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
+      prompt TEXT NOT NULL,
+      workspace_path TEXT,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      preview_image_path TEXT,
+      log_path TEXT,
+      error_message TEXT
+    );
+
+    INSERT INTO jobs (
+      id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+      started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+    )
+    SELECT
+      id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+      started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+    FROM jobs_old;
+
+    DROP TABLE jobs_old;
+  `);
+}
+
 function openDb() {
   const db = new DatabaseSync(databasePath);
   db.exec(`
@@ -124,6 +175,8 @@ function openDb() {
     }
   }
 
+  ensureExtendedJobStatuses(db);
+
   return db;
 }
 
@@ -147,6 +200,31 @@ function updateSuccess(db, logPath, summary, changedFiles) {
   `).run(now, now, summary, JSON.stringify(changedFiles || []), logPath, jobId);
 }
 
+function updateTerminalStatus(db, status, logPath, summary, message, changedFiles) {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = ?,
+      updated_at = ?,
+      finished_at = ?,
+      result_summary = ?,
+      changed_files_json = ?,
+      log_path = COALESCE(?, log_path),
+      error_message = ?
+    WHERE id = ?
+  `).run(
+    status,
+    now,
+    now,
+    summary,
+    JSON.stringify(changedFiles || []),
+    logPath,
+    message,
+    jobId,
+  );
+}
+
 function setPreviewImagePath(db, previewImagePath) {
   const now = new Date().toISOString();
   db.prepare(`
@@ -159,26 +237,13 @@ function setPreviewImagePath(db, previewImagePath) {
 }
 
 function updateFailure(db, logPath, message, changedFiles) {
-  const now = new Date().toISOString();
-  db.prepare(`
-    UPDATE jobs
-    SET
-      status = 'failed',
-      updated_at = ?,
-      finished_at = ?,
-      result_summary = ?,
-      changed_files_json = ?,
-      log_path = COALESCE(?, log_path),
-      error_message = ?
-    WHERE id = ?
-  `).run(
-    now,
-    now,
-    "작업 실행 중 오류가 발생했습니다.",
-    JSON.stringify(changedFiles || []),
+  updateTerminalStatus(
+    db,
+    "failed",
     logPath,
+    "작업 실행 중 오류가 발생했습니다.",
     message,
-    jobId,
+    changedFiles,
   );
 }
 
@@ -320,6 +385,22 @@ function buildJobDetailUrl(jobIdValue) {
   return `${baseUrl.replace(/\/$/, "")}/jobs/${jobIdValue}`;
 }
 
+function getStatusHeadline(job) {
+  if (job.status === "success") {
+    return "[Remote CLI] 작업 완료";
+  }
+
+  if (job.status === "partial") {
+    return "[Remote CLI] 작업 부분 완료";
+  }
+
+  if (job.status === "export_failed") {
+    return "[Remote CLI] export 실패";
+  }
+
+  return "[Remote CLI] 작업 실패";
+}
+
 function escapeXml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -383,6 +464,141 @@ function resolveWorkspaceAssetPath(assetPath) {
 
   const trimmed = assetPath.trim();
   return path.isAbsolute(trimmed) ? trimmed : path.join(workspacePath, trimmed);
+}
+
+function getReferenceTime(job) {
+  const timestamp = new Date(job.startedAt || job.createdAt || Date.now()).getTime();
+  return Number.isNaN(timestamp) ? Date.now() : timestamp;
+}
+
+function isFreshEnough(filePath, referenceTime) {
+  try {
+    return fs.statSync(filePath).mtimeMs >= referenceTime - 1500;
+  } catch {
+    return false;
+  }
+}
+
+function hasPenFiles(rootPath, maxDepth = 3) {
+  function visit(currentPath, depth) {
+    if (depth > maxDepth) {
+      return false;
+    }
+
+    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(rootPath, absolutePath).split(path.sep).join("/");
+
+      if (!relativePath || shouldIgnoreWorkspaceEntry(relativePath)) {
+        continue;
+      }
+
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".pen")) {
+        return true;
+      }
+
+      if (entry.isDirectory() && visit(absolutePath, depth + 1)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  try {
+    return visit(rootPath, 0);
+  } catch {
+    return false;
+  }
+}
+
+function isPencilJob(job) {
+  const prompt = String(job.prompt || "").toLowerCase();
+  return (
+    Boolean(process.env.WORKSPACE_PREVIEW_IMAGE_PATH?.trim()) ||
+    prompt.includes("pencil") ||
+    prompt.includes(".pen") ||
+    hasPenFiles(job.workspacePath || workspacePath)
+  );
+}
+
+function parseChangedPath(entry) {
+  const separatorIndex = entry.indexOf(":");
+  return separatorIndex === -1 ? entry : entry.slice(separatorIndex + 1);
+}
+
+function findLatestPngInWorkspace(rootPath, referenceTime) {
+  const candidates = [];
+
+  function visit(currentPath) {
+    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const absolutePath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(rootPath, absolutePath).split(path.sep).join("/");
+
+      if (!relativePath || shouldIgnoreWorkspaceEntry(relativePath)) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        visit(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".png")) {
+        continue;
+      }
+
+      try {
+        const stats = fs.statSync(absolutePath);
+        if (stats.mtimeMs >= referenceTime - 1500) {
+          candidates.push({ absolutePath, mtimeMs: stats.mtimeMs });
+        }
+      } catch {
+        // Ignore unreadable file.
+      }
+    }
+  }
+
+  try {
+    visit(rootPath);
+  } catch {
+    return null;
+  }
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.absolutePath || null;
+}
+
+function resolvePencilExportImage(job, changedFiles) {
+  const referenceTime = getReferenceTime(job);
+  const configuredImagePath = resolveWorkspaceAssetPath(
+    process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
+  );
+
+  if (
+    configuredImagePath &&
+    fs.existsSync(configuredImagePath) &&
+    isFreshEnough(configuredImagePath, referenceTime)
+  ) {
+    return configuredImagePath;
+  }
+
+  const changedPng = (changedFiles || [])
+    .map(parseChangedPath)
+    .filter((relativePath) => relativePath.toLowerCase().endsWith(".png"))
+    .map((relativePath) => path.join(workspacePath, relativePath))
+    .filter((absolutePath) => fs.existsSync(absolutePath) && isFreshEnough(absolutePath, referenceTime))
+    .sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs)[0];
+
+  if (changedPng) {
+    return changedPng;
+  }
+
+  return findLatestPngInWorkspace(workspacePath, referenceTime);
 }
 
 async function generatePreviewFromImageFile(sourcePath) {
@@ -457,6 +673,20 @@ async function generatePreviewImage(job) {
 }
 
 async function generateBestPreviewImage(job, logStream) {
+  const pencilJob = isPencilJob(job);
+  const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles : [];
+
+  if (pencilJob) {
+    const sourcePath = resolvePencilExportImage(job, changedFiles);
+
+    if (!sourcePath) {
+      throw new Error("Pencil 작업의 실제 export PNG를 찾지 못했습니다.");
+    }
+
+    appendLine(logStream, `[worker] using pencil export image: ${sourcePath}`);
+    return generatePreviewFromImageFile(sourcePath);
+  }
+
   const configuredImagePath = resolveWorkspaceAssetPath(
     process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
   );
@@ -491,13 +721,18 @@ async function generateBestPreviewImage(job, logStream) {
 
 function buildTelegramText(job) {
   const lines = [
-    job.status === "success" ? "[Remote CLI] 작업 완료" : "[Remote CLI] 작업 실패",
+    getStatusHeadline(job),
     `제목: ${job.title}`,
     `엔진: ${job.engine}`,
     `상태: ${job.status}`,
   ];
 
-  if (job.status === "success" && job.resultSummary) {
+  if (
+    (job.status === "success" ||
+      job.status === "partial" ||
+      job.status === "export_failed") &&
+    job.resultSummary
+  ) {
     lines.push(`요약: ${job.resultSummary}`);
   }
 
@@ -508,7 +743,7 @@ function buildTelegramText(job) {
     );
   }
 
-  if (job.status === "failed" && job.errorMessage) {
+  if (FAILURE_LIKE_STATUSES.has(job.status) && job.errorMessage) {
     lines.push(`에러: ${job.errorMessage}`);
   }
 
@@ -551,10 +786,58 @@ async function sendTelegramPhoto(token, chatId, photoPath, caption) {
   return payload.result;
 }
 
-async function sendTelegramNotification(job) {
+async function sendTelegramText(token, chatId, text) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true,
+    }),
+  });
+
+  const payload = await response.json();
+
+  if (!response.ok || !payload.ok) {
+    throw new Error(
+      payload.description || `Telegram API request failed with status ${response.status}.`,
+    );
+  }
+
+  return payload.result;
+}
+
+async function sendTelegramProgress(job, stage, extraLines = []) {
+  const token = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim();
+  const chatId = process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
+
+  if (!token || !chatId) {
+    return null;
+  }
+
+  return sendTelegramText(
+    token,
+    chatId,
+    [
+      "[Pencil] 진행 상황",
+      `단계: ${stage}`,
+      `작업: ${job.id}`,
+      `제목: ${job.title}`,
+      `엔진: ${job.engine}`,
+      ...extraLines,
+    ].join("\n"),
+  );
+}
+
+async function sendTelegramNotification(job, options = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_BOT_TOKEN.trim();
   const chatId = process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
   const sentAt = new Date().toISOString();
+  const requirePreview = Boolean(options.requirePreview);
+  const forceText = Boolean(options.forceText);
 
   if (!token || !chatId) {
     return {
@@ -568,7 +851,7 @@ async function sendTelegramNotification(job) {
   try {
     const text = buildTelegramText(job);
 
-    if (job.previewImagePath && fs.existsSync(job.previewImagePath)) {
+    if (!forceText && job.previewImagePath && fs.existsSync(job.previewImagePath)) {
       const payload = await sendTelegramPhoto(token, chatId, job.previewImagePath, text);
       return {
         sentAt,
@@ -578,33 +861,20 @@ async function sendTelegramNotification(job) {
       };
     }
 
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true,
-      }),
-    });
-
-    const payload = await response.json();
-
-    if (!response.ok || !payload.ok) {
+    if (requirePreview) {
       return {
         sentAt,
         status: "failed",
-        errorMessage:
-          payload.description || `Telegram API request failed with status ${response.status}.`,
+        errorMessage: "실제 PNG가 없어 이미지 전송을 완료하지 못했습니다.",
       };
     }
+
+    const payload = await sendTelegramText(token, chatId, text);
 
     return {
       sentAt,
       status: "sent",
-      messageId: String(payload.result.message_id),
+      messageId: String(payload.message_id),
       errorMessage: null,
     };
   } catch (error) {
@@ -637,6 +907,16 @@ async function main() {
   appendLine(logStream, `[${new Date().toISOString()}] starting ${job.engine} runner`);
   const workspaceSnapshotBefore =
     job.mode === "edit" ? snapshotWorkspace(workspacePath) : new Map();
+  const pencilJob = isPencilJob(job);
+
+  if (pencilJob) {
+    await sendTelegramProgress(job, "작업 시작", [
+      `workspace: ${job.workspacePath || workspacePath}`,
+    ]).catch(() => null);
+    await sendTelegramProgress(job, "수정 중", [
+      `mode: ${job.mode}`,
+    ]).catch(() => null);
+  }
 
   const child = spawn(engine.command, engine.buildArgs(job.prompt, job.mode), {
     cwd: workspacePath,
@@ -655,6 +935,17 @@ async function main() {
   let lastStdoutLine = "";
   let stderrLines = [];
   let settled = false;
+  let cleanedUp = false;
+
+  function finalize() {
+    if (cleanedUp) {
+      return;
+    }
+
+    cleanedUp = true;
+    logStream.end();
+    db.close();
+  }
 
   function settleFailure(message) {
     if (settled) {
@@ -668,17 +959,7 @@ async function main() {
         : [];
     updateFailure(db, logPath, message, changedFiles);
     const failedJob = mapJob(getJob(db));
-    generateBestPreviewImage(failedJob, logStream)
-      .then((previewImagePath) => {
-        setPreviewImagePath(db, previewImagePath);
-        appendLine(logStream, `[worker] preview image saved: ${previewImagePath}`);
-        return mapJob(getJob(db));
-      })
-      .catch((error) => {
-        appendLine(logStream, `[worker] preview image failed: ${error.message}`);
-        return failedJob;
-      })
-      .then((jobWithPreview) => sendTelegramNotification(jobWithPreview))
+    sendTelegramNotification(failedJob)
       .then((result) => {
         insertNotificationLog(db, {
           jobId,
@@ -689,8 +970,7 @@ async function main() {
         });
       })
       .finally(() => {
-        logStream.end();
-        db.close();
+        finalize();
       });
   }
 
@@ -710,18 +990,54 @@ async function main() {
     }
     updateSuccess(db, logPath, summary, changedFiles);
     const successfulJob = mapJob(getJob(db));
-    generateBestPreviewImage(successfulJob, logStream)
+    Promise.resolve()
+      .then(() => {
+        if (!pencilJob) {
+          return null;
+        }
+
+        return sendTelegramProgress(successfulJob, "export 중");
+      })
+      .then(() => generateBestPreviewImage({ ...successfulJob, changedFiles }, logStream))
       .then((previewImagePath) => {
         setPreviewImagePath(db, previewImagePath);
         appendLine(logStream, `[worker] preview image saved: ${previewImagePath}`);
         return mapJob(getJob(db));
       })
-      .catch((error) => {
-        appendLine(logStream, `[worker] preview image failed: ${error.message}`);
-        return successfulJob;
+      .then((jobWithPreview) => {
+        if (!pencilJob) {
+          return sendTelegramNotification(jobWithPreview);
+        }
+
+        return sendTelegramProgress(jobWithPreview, "이미지 전송 중", [
+          `png: ${jobWithPreview.previewImagePath}`,
+        ])
+          .catch(() => null)
+          .then(() => sendTelegramNotification(jobWithPreview, { requirePreview: true }));
       })
-      .then((jobWithPreview) => sendTelegramNotification(jobWithPreview))
       .then((result) => {
+        if (pencilJob && result.status === "failed") {
+          updateTerminalStatus(
+            db,
+            "partial",
+            logPath,
+            successfulJob.resultSummary || summary,
+            result.errorMessage || "실제 PNG 전송에 실패했습니다.",
+            changedFiles,
+          );
+
+          return sendTelegramNotification(mapJob(getJob(db)), { forceText: true })
+            .then((fallbackResult) => {
+              insertNotificationLog(db, {
+                jobId,
+                sentAt: fallbackResult.sentAt,
+                status: fallbackResult.status,
+                messageId: fallbackResult.messageId,
+                errorMessage: fallbackResult.errorMessage,
+              });
+            });
+        }
+
         insertNotificationLog(db, {
           jobId,
           sentAt: result.sentAt,
@@ -730,9 +1046,46 @@ async function main() {
           errorMessage: result.errorMessage,
         });
       })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        appendLine(logStream, `[worker] preview pipeline failed: ${message}`);
+
+        if (pencilJob) {
+          updateTerminalStatus(
+            db,
+            "export_failed",
+            logPath,
+            successfulJob.resultSummary || summary,
+            message,
+            changedFiles,
+          );
+
+          return sendTelegramNotification(mapJob(getJob(db)))
+            .then((result) => {
+              insertNotificationLog(db, {
+                jobId,
+                sentAt: result.sentAt,
+                status: result.status,
+                messageId: result.messageId,
+                errorMessage: result.errorMessage,
+              });
+            });
+        }
+
+        updateFailure(db, logPath, message, changedFiles);
+        return sendTelegramNotification(mapJob(getJob(db)))
+          .then((result) => {
+            insertNotificationLog(db, {
+              jobId,
+              sentAt: result.sentAt,
+              status: result.status,
+              messageId: result.messageId,
+              errorMessage: result.errorMessage,
+            });
+          });
+      })
       .finally(() => {
-        logStream.end();
-        db.close();
+        finalize();
       });
   }
 

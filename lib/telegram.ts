@@ -18,13 +18,24 @@ function getJobDetailUrl(jobId: string) {
 
 function buildTelegramText(job: Job) {
   const lines = [
-    job.status === "success" ? "[Remote CLI] 작업 완료" : "[Remote CLI] 작업 실패",
+    job.status === "success"
+      ? "[Remote CLI] 작업 완료"
+      : job.status === "partial"
+        ? "[Remote CLI] 작업 부분 완료"
+        : job.status === "export_failed"
+          ? "[Remote CLI] export 실패"
+          : "[Remote CLI] 작업 실패",
     `제목: ${job.title}`,
     `엔진: ${job.engine}`,
     `상태: ${job.status}`,
   ];
 
-  if (job.status === "success" && job.resultSummary) {
+  if (
+    (job.status === "success" ||
+      job.status === "partial" ||
+      job.status === "export_failed") &&
+    job.resultSummary
+  ) {
     lines.push(`요약: ${job.resultSummary}`);
   }
 
@@ -34,7 +45,12 @@ function buildTelegramText(job: Job) {
     );
   }
 
-  if (job.status === "failed" && job.errorMessage) {
+  if (
+    (job.status === "failed" ||
+      job.status === "partial" ||
+      job.status === "export_failed") &&
+    job.errorMessage
+  ) {
     lines.push(`에러: ${job.errorMessage}`);
   }
 

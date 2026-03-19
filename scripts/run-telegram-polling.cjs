@@ -21,6 +21,56 @@ const workerPath = path.join(appRoot, "scripts", "run-job-worker.cjs");
 const logsDir = path.join(appRoot, "data", "logs");
 const ALLOWED_ENGINES = new Set(["gemini", "codex", "custom"]);
 
+function getJobsTableSql(db) {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'")
+    .get();
+
+  return row ? row.sql : null;
+}
+
+function ensureExtendedJobStatuses(db) {
+  const jobsTableSql = getJobsTableSql(db);
+
+  if (!jobsTableSql || jobsTableSql.includes("export_failed")) {
+    return;
+  }
+
+  db.exec(`
+    ALTER TABLE jobs RENAME TO jobs_old;
+
+    CREATE TABLE jobs (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      engine TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
+      prompt TEXT NOT NULL,
+      workspace_path TEXT,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed', 'partial', 'export_failed')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      result_summary TEXT,
+      changed_files_json TEXT NOT NULL DEFAULT '[]',
+      preview_image_path TEXT,
+      log_path TEXT,
+      error_message TEXT
+    );
+
+    INSERT INTO jobs (
+      id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+      started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+    )
+    SELECT
+      id, title, engine, mode, prompt, workspace_path, status, created_at, updated_at,
+      started_at, finished_at, result_summary, changed_files_json, preview_image_path, log_path, error_message
+    FROM jobs_old;
+
+    DROP TABLE jobs_old;
+  `);
+}
+
 if (!pollingEnabled) {
   console.error("TELEGRAM_POLLING_ENABLED is not true.");
   process.exit(1);
@@ -79,7 +129,7 @@ function createDb() {
       mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit')),
       prompt TEXT NOT NULL,
       workspace_path TEXT,
-      status TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed', 'partial', 'export_failed')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       started_at TEXT,
@@ -134,6 +184,8 @@ function createDb() {
       // Column already exists.
     }
   }
+
+  ensureExtendedJobStatuses(db);
   return db;
 }
 
