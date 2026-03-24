@@ -1,0 +1,36 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1440" height="900" fill="#0F1013"/>
+  <rect x="44" y="44" width="1352" height="812" rx="28" fill="#15171B" stroke="#343A46" stroke-width="2"/>
+
+  <text x="96" y="112" fill="#DAB8C9" font-family="Menlo, Monaco, monospace" font-size="20">veremote</text>
+  <text x="96" y="150" fill="#95B8B2" font-family="Menlo, Monaco, monospace" font-size="16">single active workspace · telegram remote coding · close beta</text>
+
+  <rect x="96" y="196" width="1248" height="96" rx="18" fill="#101215" stroke="#2B313C"/>
+  <text x="126" y="236" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="18">workspace  verygood_dev/web   |   engine  gemini   |   preview  127.0.0.1:5173</text>
+  <text x="126" y="270" fill="#A7C080" font-family="Menlo, Monaco, monospace" font-size="16">natural language: "make the footer bigger" / "where am I connected?" / "send me the screenshot"</text>
+
+  <rect x="96" y="332" width="820" height="384" rx="20" fill="#111317" stroke="#2B313C"/>
+  <text x="126" y="374" fill="#DAB8C9" font-family="Menlo, Monaco, monospace" font-size="18">Fullscreen TUI</text>
+  <text x="126" y="416" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="16">&gt; ask make the footer bigger and keep mobile spacing balanced</text>
+  <text x="126" y="456" fill="#95B8B2" font-family="Menlo, Monaco, monospace" font-size="15">[16:18:02] started edit job job_7f7c...</text>
+  <text x="126" y="486" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">[16:18:02] engine: gemini</text>
+  <text x="126" y="516" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">[16:18:02] workspace: /Users/.../verygood_dev/web</text>
+  <text x="126" y="566" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">[16:18:14] job 7f7c | changed files: modified:src/App.css</text>
+  <text x="126" y="596" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">[16:18:15] job 7f7c | preview image saved: .veremote/previews/job_7f7c.png</text>
+  <text x="126" y="656" fill="#8E97A3" font-family="Menlo, Monaco, monospace" font-size="14">tips: just type a sentence, veremote auto-picks run or edit</text>
+
+  <rect x="948" y="332" width="396" height="384" rx="20" fill="#101215" stroke="#2B313C"/>
+  <text x="978" y="374" fill="#DAB8C9" font-family="Menlo, Monaco, monospace" font-size="18">Telegram</text>
+
+  <rect x="978" y="406" width="326" height="64" rx="16" fill="#1C222B"/>
+  <text x="1000" y="445" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">make the footer bigger</text>
+
+  <rect x="978" y="492" width="326" height="128" rx="16" fill="#211C26"/>
+  <text x="1000" y="527" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="15">[Remote CLI] 작업 완료</text>
+  <text x="1000" y="556" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="14">mode: edit · engine: gemini</text>
+  <text x="1000" y="584" fill="#EDE7DF" font-family="Menlo, Monaco, monospace" font-size="14">changed: modified:src/App.css</text>
+  <text x="1000" y="612" fill="#A7C080" font-family="Menlo, Monaco, monospace" font-size="14">screenshot attached</text>
+
+  <rect x="96" y="756" width="1248" height="52" rx="16" fill="#101215" stroke="#2B313C"/>
+  <text x="126" y="789" fill="#8E97A3" font-family="Menlo, Monaco, monospace" font-size="15">trusted local environment only · single active workspace · telegram chat allowlist</text>
+</svg>

@@ -2,6 +2,19 @@
 
 veremote is a close-beta CLI for remotely nudging your local coding workspace through Telegram.
 
+> [!WARNING]
+> veremote controls your local active workspace through Telegram and local engine CLIs.
+> Use it only in a trusted environment, with a trusted Telegram chat, on a machine you control.
+> This is a close-beta tool, not a multi-user SaaS or hardened remote admin product.
+
+## 30-Second Summary
+
+- **Who this is for:** technical users who want to remotely inspect or tweak their local project from Telegram.
+- **What you need:** Node.js 24, a Telegram bot token/chat id, `gemini` or `codex`, and Playwright for web screenshots.
+- **Fastest path:** `npm install && npm link && veremote init && veremote doctor`.
+- **How it works:** connect one active workspace, keep `veremote` open, then send natural-language requests from Telegram.
+- **Safety model:** single active workspace, Telegram chat allowlist, local-machine execution only.
+
 It is optimized for a single active workspace on your machine:
 
 - connect the current folder as the active workspace
@@ -11,6 +24,10 @@ It is optimized for a single active workspace on your machine:
 - receive text summaries, changed files, and preview images
 
 This repository is not published to npm yet. For now, beta users install it from source and expose the `veremote` command with `npm link`.
+
+## Product Preview
+
+![veremote preview](docs/assets/veremote-preview.svg)
 
 ## Current Beta Scope
 
@@ -53,7 +70,7 @@ npx playwright install chromium
 Clone the repository, install dependencies, then expose the global command:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/nam9295-cmyk/remote_cli.git
 cd remote_cli
 npm install
 npm link
@@ -403,3 +420,18 @@ Detailed onboarding:
 Close-beta smoke test checklist:
 
 - [docs/close-beta-smoke-test.md](docs/close-beta-smoke-test.md)
+
+## Repository Layout
+
+The current beta-facing surface is intentionally small:
+
+- `README.md`
+- `LICENSE`
+- `cli_plan/`
+- `docs/`
+- `scripts/`
+- `lib/`
+
+Archived dashboard-era planning documents now live under:
+
+- `docs/archive/dashboard-prototype/`
