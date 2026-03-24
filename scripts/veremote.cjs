@@ -40,6 +40,7 @@ const DEFAULT_LOGO_LINES = [
   "                 |___/ |___/                 ",
 ];
 const HELP_ROWS = [
+  ["ask <prompt>", "Auto-pick run or edit from your prompt"],
   ["run <prompt>", "Start a read-only job in the current workspace"],
   ["edit <prompt>", "Allow file changes inside the active workspace"],
   ["engine <name>", "Switch engine: gemini, codex, custom"],
@@ -71,6 +72,8 @@ const THEME = {
   success: "#a7c080",
   warning: "#d9a066",
 };
+const EDIT_INTENT_PATTERN =
+  /(수정|바꿔|변경|고쳐|추가|삭제|지워|리팩토링|리네임|이동|생성|만들어|적용|키워|줄여|늘려|update|edit|change|modify|fix|create|remove|delete|rename|replace|refactor|increase|decrease|add )/i;
 
 function getJobsTableSql(db) {
   const row = db
@@ -661,6 +664,10 @@ function launchJobRunner(jobId, workspace) {
   child.unref();
 }
 
+function detectRequestedMode(prompt) {
+  return EDIT_INTENT_PATTERN.test(prompt) ? "edit" : "run";
+}
+
 function queueJob(db, mode, prompt) {
   if (!prompt.trim()) {
     return {
@@ -838,6 +845,7 @@ function printUsage() {
   console.log(paint("Usage", ANSI.label));
   console.log(paint("─────", ANSI.line));
   console.log("veremote");
+  console.log("veremote help");
   console.log("veremote init");
   console.log("veremote doctor");
   console.log("veremote connect");
@@ -1375,7 +1383,7 @@ function createTuiWidgets(screen) {
     left: 2,
     right: 2,
     height: 1,
-    content: "Enter submit | PgUp/PgDn scroll logs | Ctrl+C / Esc / Ctrl+D quit",
+    content: "Enter submit | PgUp/PgDn scroll logs | Ctrl+C / Ctrl+D quit",
     style: {
       fg: THEME.muted,
       bg: THEME.panelAlt,
@@ -1414,12 +1422,13 @@ function buildHelpText() {
 
   lines.push("");
   lines.push("tips");
+  lines.push("ask <prompt> auto-picks run or edit from your wording");
   lines.push("engine gemini / engine codex switches the active engine");
   lines.push("preview url http://localhost:3000 sets web screenshots");
   lines.push("preview image ./export.png or preview pencil ./export.png sets explicit preview policy");
   lines.push("status / where append details to the log panel");
-  lines.push("run / edit create background jobs immediately");
-  lines.push("telegram examples: /where /engine codex /run ... /edit ... /job last /tail last /screenshot last");
+  lines.push("plain sentences also start a background job automatically");
+  lines.push("telegram examples: where engine codex ask ... edit ... job last tail last screenshot last");
   lines.push("run `veremote daemon` in another terminal to receive telegram commands");
   lines.push("the prompt stays pinned to the bottom");
 
@@ -1674,8 +1683,9 @@ function startFullScreenTui(db) {
     const [command, ...rest] = trimmed.split(" ");
     const prompt = rest.join(" ").trim();
 
-    if (command === "run" || command === "edit") {
-      const result = queueJob(db, command, prompt);
+    if (command === "run" || command === "edit" || command === "ask") {
+      const requestedMode = command === "ask" ? detectRequestedMode(prompt) : command;
+      const result = queueJob(db, requestedMode, prompt);
 
       if (!result.ok) {
         appendSystem(result.error);
@@ -1684,10 +1694,11 @@ function startFullScreenTui(db) {
       }
 
       appendSystem([
-        `started ${command} job ${result.job.id}`,
+        `started ${requestedMode} job ${result.job.id}`,
         `engine: ${result.workspace.engine}`,
         `workspace: ${result.workspace.path}`,
-      ]);
+        command === "ask" ? `selected by prompt: ${requestedMode}` : null,
+      ].filter(Boolean));
       registerWatcher(result.job.id, result.logPath);
       refreshSummary();
       return;
@@ -1770,6 +1781,27 @@ function startFullScreenTui(db) {
       return;
     }
 
+    if (trimmed.length >= 6) {
+      const requestedMode = detectRequestedMode(trimmed);
+      const result = queueJob(db, requestedMode, trimmed);
+
+      if (!result.ok) {
+        appendSystem(result.error);
+        refreshSummary();
+        return;
+      }
+
+      appendSystem([
+        `started ${requestedMode} job ${result.job.id}`,
+        `engine: ${result.workspace.engine}`,
+        `workspace: ${result.workspace.path}`,
+        `selected by prompt: ${requestedMode}`,
+      ]);
+      registerWatcher(result.job.id, result.logPath);
+      refreshSummary();
+      return;
+    }
+
     appendSystem(`Unknown command: ${command}`);
     appendSystem("Type `help` to see the available commands.");
   }
@@ -1806,7 +1838,7 @@ function startFullScreenTui(db) {
   }
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
-  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘, /job last, /tail last, /screenshot last");
+  appendSystem("Telegram examples: where, engine codex, ask 이 프로젝트를 한 줄로 요약해줘, edit Header.tsx의 타이틀을 더 크게 수정해줘, job last, tail last, screenshot last");
   appendSystem("Local preview examples: preview url http://localhost:3000 | preview image ./export.png | preview pencil ./export.png | preview clear");
   appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
@@ -1822,7 +1854,7 @@ function startFullScreenTui(db) {
 
   widgets.input.focus();
 
-  const exitKeys = ["C-c", "escape", "C-d"];
+  const exitKeys = ["C-c", "C-d"];
   screen.key(exitKeys, cleanup);
   widgets.input.key(exitKeys, cleanup);
   widgets.conversation.key(exitKeys, cleanup);

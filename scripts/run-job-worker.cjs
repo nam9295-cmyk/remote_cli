@@ -414,6 +414,56 @@ function getStatusHeadline(job) {
   return "[Remote CLI] 작업 실패";
 }
 
+function truncateText(value, length) {
+  const text = String(value || "").trim();
+  return text.length <= length ? text : `${text.slice(0, length - 1)}…`;
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return "-";
+  }
+
+  try {
+    return new Intl.DateTimeFormat("ko-KR", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+function formatElapsed(startedAt, finishedAt) {
+  if (!startedAt) {
+    return null;
+  }
+
+  const started = new Date(startedAt).getTime();
+  const ended = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+
+  if (Number.isNaN(started) || Number.isNaN(ended)) {
+    return null;
+  }
+
+  const elapsedSeconds = Math.max(0, Math.floor((ended - started) / 1000));
+  const hours = Math.floor(elapsedSeconds / 3600);
+  const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+  const seconds = elapsedSeconds % 60;
+  const parts = [];
+
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+
+  if (minutes > 0 || hours > 0) {
+    parts.push(`${minutes}m`);
+  }
+
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
 function escapeXml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -526,6 +576,70 @@ function getWorkspacePreviewProfile() {
     type: null,
     target: null,
   };
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function getWorkspaceWebPreviewCandidates() {
+  const candidates = [];
+  const seen = new Set();
+  const packageCandidates = [
+    { label: "workspace root", packagePath: path.join(workspacePath, "package.json") },
+    { label: "workspace web/", packagePath: path.join(workspacePath, "web", "package.json") },
+  ];
+
+  function pushCandidate(url, reason) {
+    if (!url || seen.has(url)) {
+      return;
+    }
+
+    seen.add(url);
+    candidates.push({ url, reason });
+  }
+
+  for (const entry of packageCandidates) {
+    if (!fs.existsSync(entry.packagePath)) {
+      continue;
+    }
+
+    const packageJson = readJsonFile(entry.packagePath);
+
+    if (!packageJson) {
+      continue;
+    }
+
+    const devScript = String(packageJson.scripts?.dev || "");
+    const usesVite =
+      devScript.includes("vite") ||
+      Boolean(packageJson.devDependencies?.vite) ||
+      Boolean(packageJson.dependencies?.vite);
+    const usesNext =
+      devScript.includes("next dev") ||
+      Boolean(packageJson.devDependencies?.next) ||
+      Boolean(packageJson.dependencies?.next);
+
+    if (usesVite) {
+      pushCandidate("http://localhost:5173", `${entry.label} vite`);
+      pushCandidate("http://127.0.0.1:5173", `${entry.label} vite`);
+      pushCandidate("http://localhost:4173", `${entry.label} vite preview`);
+      pushCandidate("http://127.0.0.1:4173", `${entry.label} vite preview`);
+    }
+
+    if (usesNext) {
+      pushCandidate("http://localhost:3000", `${entry.label} next`);
+      pushCandidate("http://127.0.0.1:3000", `${entry.label} next`);
+      pushCandidate("http://localhost:3001", `${entry.label} next alt`);
+      pushCandidate("http://127.0.0.1:3001", `${entry.label} next alt`);
+    }
+  }
+
+  return candidates;
 }
 
 function isPencilJob() {
@@ -730,6 +844,23 @@ async function generateBestPreviewImage(job, logStream) {
   }
 
   if (!previewProfile.type) {
+    const detectedPreviewUrls = getWorkspaceWebPreviewCandidates();
+
+    for (const candidate of detectedPreviewUrls) {
+      try {
+        appendLine(
+          logStream,
+          `[worker] auto-detected preview url (${candidate.reason}): ${candidate.url}`,
+        );
+        return await generatePreviewFromUrl(candidate.url);
+      } catch (error) {
+        appendLine(
+          logStream,
+          `[worker] auto-detected preview url failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     const configuredImage = resolveWorkspaceAssetPath(
       process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
     );
@@ -772,9 +903,22 @@ function buildTelegramText(job) {
   const lines = [
     getStatusHeadline(job),
     `제목: ${job.title}`,
+    `모드: ${job.mode}`,
     `엔진: ${job.engine}`,
     `상태: ${job.status}`,
+    `워크스페이스: ${job.workspacePath || workspacePath}`,
   ];
+
+  lines.push(`시작: ${formatTimestamp(job.startedAt || job.createdAt)}`);
+
+  if (job.finishedAt) {
+    lines.push(`완료: ${formatTimestamp(job.finishedAt)}`);
+  }
+
+  const elapsed = formatElapsed(job.startedAt || job.createdAt, job.finishedAt);
+  if (elapsed) {
+    lines.push(`경과: ${elapsed}`);
+  }
 
   if (
     (job.status === "success" ||
@@ -782,18 +926,23 @@ function buildTelegramText(job) {
       job.status === "export_failed") &&
     job.resultSummary
   ) {
-    lines.push(`요약: ${job.resultSummary}`);
+    lines.push(`요약: ${truncateText(job.resultSummary, 360)}`);
   }
 
+  const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles : [];
+
   if (job.mode === "edit") {
-    const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles : [];
     lines.push(
-      `변경 파일: ${changedFiles.length > 0 ? changedFiles.join(", ") : "없음"}`,
+      `변경 파일: ${changedFiles.length > 0 ? changedFiles.slice(0, 6).join(", ") : "없음"}`,
     );
+
+    if (changedFiles.length > 6) {
+      lines.push(`추가 변경: ${changedFiles.length - 6}개`);
+    }
   }
 
   if (FAILURE_LIKE_STATUSES.has(job.status) && job.errorMessage) {
-    lines.push(`에러: ${job.errorMessage}`);
+    lines.push(`에러: ${truncateText(job.errorMessage, 240)}`);
   }
 
   if (job.previewImagePath) {
@@ -805,6 +954,8 @@ function buildTelegramText(job) {
   if (detailUrl) {
     lines.push(`상세: ${detailUrl}`);
   }
+
+  lines.push("확인: job last | tail last | screenshot last");
 
   return lines.join("\n");
 }

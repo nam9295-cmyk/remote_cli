@@ -583,7 +583,7 @@ function buildDaemonStartedText(workspace) {
     lines.push(`path: ${workspace.path}`);
     lines.push(`engine: ${workspace.engine}`);
     lines.push(`preview: ${formatPreviewProfile(workspace)}`);
-    lines.push("commands: /where, /engine <name>, /run <prompt>, /edit <prompt>, /job last, /tail last");
+    lines.push("commands: /where or where, /engine <name>, /ask <prompt>, /run <prompt>, /edit <prompt>, /job last, /tail last");
     lines.push("policy: /run = read-only, /edit = workspace 내부 파일 수정 허용");
   } else {
     lines.push("workspace: none");
@@ -596,8 +596,9 @@ function buildDaemonStartedText(workspace) {
 function normalizeCommand(text) {
   const trimmed = text.trim();
   const [rawCommand, ...rest] = trimmed.split(/\s+/);
-  const command = rawCommand.replace(/@.+$/, "");
-  return { command, argsText: rest.join(" "), rawText: trimmed };
+  const hadSlash = rawCommand.startsWith("/");
+  const command = rawCommand.replace(/^\/+/, "").replace(/@.+$/, "").toLowerCase();
+  return { command, argsText: rest.join(" "), rawText: trimmed, hadSlash };
 }
 
 function truncate(value, length) {
@@ -869,27 +870,224 @@ function recoverStaleRunningJobs(db) {
   return recoveredCount;
 }
 
-async function handleCommand(db, text) {
-  const { command, argsText, rawText } = normalizeCommand(text);
+const EDIT_INTENT_PATTERN =
+  /(수정|바꿔|변경|고쳐|추가|삭제|지워|리팩토링|리네임|이동|생성|만들어|적용|키워|줄여|늘려|update|edit|change|modify|fix|create|remove|delete|rename|replace|refactor|increase|decrease|add )/i;
+const KNOWN_COMMANDS = new Set([
+  "help",
+  "start",
+  "where",
+  "engine",
+  "status",
+  "last",
+  "job",
+  "tail",
+  "screenshot",
+  "run",
+  "edit",
+  "ask",
+]);
 
-  if (!rawText.startsWith("/")) {
-    return { replyText: null, resultText: "ignored non-command" };
+function detectRequestedMode(prompt) {
+  return EDIT_INTENT_PATTERN.test(prompt) ? "edit" : "run";
+}
+
+function buildUnifiedPrompt(prompt, mode) {
+  if (mode === "edit") {
+    return [
+      "Edit mode. File changes are allowed only inside the active workspace.",
+      "반드시 변경 파일 목록과 수정 요약을 남겨주세요.",
+      "",
+      prompt,
+    ].join("\n");
   }
 
-  if (command === "/help" || command === "/start") {
+  return [
+    "Run mode. Stay read-only and do not modify files.",
+    "Analyze, inspect, summarize, or execute non-editing steps only.",
+    "",
+    prompt,
+  ].join("\n");
+}
+
+function buildLaunchReply(job, workspace, detailUrl, requestedMode, requestedPrompt, sourceCommand) {
+  const lines = [
+    sourceCommand === "ask"
+      ? "통합 작업이 생성되고 바로 실행을 시작했습니다."
+      : requestedMode === "edit"
+        ? "수정 작업이 생성되고 바로 실행을 시작했습니다."
+        : "작업이 생성되고 바로 실행을 시작했습니다.",
+    `id: ${job.id}`,
+    `title: ${job.title}`,
+    `mode: ${requestedMode}`,
+    `engine: ${workspace.engine}`,
+    `workspace: ${workspace.name}`,
+    `preview: ${formatPreviewProfile(workspace)}`,
+    `prompt: ${truncate(requestedPrompt, 120)}`,
+    "확인: job last | tail last | screenshot last",
+  ];
+
+  if (detailUrl) {
+    lines.push(`detail: ${detailUrl}`);
+  }
+
+  return lines.join("\n");
+}
+
+function detectNaturalLanguageCommand(rawText) {
+  const text = String(rawText || "").trim();
+  const lower = text.toLowerCase();
+
+  if (!text) {
+    return null;
+  }
+
+  if (
+    (text.includes("어디") && (text.includes("연결") || text.includes("워크스페이스") || text.includes("프로젝트"))) ||
+    text.includes("현재 경로") ||
+    text.includes("지금 경로")
+  ) {
+    return { command: "where", argsText: "" };
+  }
+
+  if (
+    text.includes("최근 로그") ||
+    text.includes("로그 보여") ||
+    text.includes("진행 로그") ||
+    text.includes("진행상황") ||
+    text.includes("진행 상황")
+  ) {
+    return { command: "tail", argsText: "last" };
+  }
+
+  if (
+    text.includes("스크린샷") ||
+    ((text.includes("사진") || text.includes("이미지")) &&
+      (text.includes("보내") || text.includes("보여") || text.includes("결과")))
+  ) {
+    return { command: "screenshot", argsText: "last" };
+  }
+
+  if (
+    (text.includes("마지막 작업") || text.includes("최근 작업")) &&
+    !text.includes("로그") &&
+    !text.includes("스크린샷") &&
+    !text.includes("사진") &&
+    !text.includes("이미지")
+  ) {
+    return { command: "last", argsText: "" };
+  }
+
+  if (text.includes("엔진")) {
+    if (
+      text.includes("코덱스") ||
+      lower.includes("codex")
+    ) {
+      return { command: "engine", argsText: "codex" };
+    }
+
+    if (
+      text.includes("제미나이") ||
+      lower.includes("gemini")
+    ) {
+      return { command: "engine", argsText: "gemini" };
+    }
+
+    if (
+      text.includes("커스텀") ||
+      lower.includes("custom")
+    ) {
+      return { command: "engine", argsText: "custom" };
+    }
+
+    if (
+      text.includes("뭐") ||
+      text.includes("현재") ||
+      text.includes("어떤")
+    ) {
+      return { command: "engine", argsText: "" };
+    }
+  }
+
+  if (
+    text.includes("도움말") ||
+    text.includes("명령어 알려") ||
+    text.includes("사용법")
+  ) {
+    return { command: "help", argsText: "" };
+  }
+
+  return null;
+}
+
+function launchTelegramJob(db, workspace, requestedMode, prompt, sourceCommand) {
+  const titlePrefix = sourceCommand === "ask" ? "Telegram ask" : `Telegram ${requestedMode}`;
+  const title = `${titlePrefix} — ${truncate(prompt, requestedMode === "edit" ? 27 : 28)}`;
+  const job = createJob(db, {
+    title,
+    engine: workspace.engine,
+    mode: requestedMode,
+    prompt: buildUnifiedPrompt(prompt, requestedMode),
+    workspacePath: workspace.path,
+  });
+  const logPath = createLogPath(job.id);
+
+  try {
+    markJobAsRunning(db, job.id, logPath);
+    launchJobRunner(job.id, workspace);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : `Telegram ${requestedMode} launch failed.`;
+    markJobAsFailed(db, job.id, logPath, message);
+    return {
+      ok: false,
+      replyText:
+        requestedMode === "edit"
+          ? `수정 작업을 시작하지 못했습니다.\nerror: ${message}`
+          : `작업 실행을 시작하지 못했습니다.\nerror: ${message}`,
+      resultText: `${requestedMode} failed for ${job.id}`,
+    };
+  }
+
+  const detailUrl = getJobUrl(job.id);
+  return {
+    ok: true,
+    replyText: buildLaunchReply(job, workspace, detailUrl, requestedMode, prompt, sourceCommand),
+    resultText: `${sourceCommand} launched for ${job.id}`,
+  };
+}
+
+async function handleCommand(db, text) {
+  const normalized = normalizeCommand(text);
+  const naturalCommand = !normalized.hadSlash ? detectNaturalLanguageCommand(normalized.rawText) : null;
+  const command = naturalCommand ? naturalCommand.command : normalized.command;
+  const argsText = naturalCommand ? naturalCommand.argsText : normalized.argsText;
+  const rawText = normalized.rawText;
+  const hadSlash = normalized.hadSlash;
+
+  if (!command) {
+    return { replyText: null, resultText: "ignored empty text" };
+  }
+
+  if (command === "help" || command === "start") {
     return {
       replyText: [
-        "사용 가능한 명령:",
+        "사용 가능한 명령: 슬래시 없이도 됩니다.",
         "/help",
+        "help",
         "/where",
+        "where",
         "/engine <name>",
         "/status",
         "/last",
         "/job <id|last>",
         "/tail <id|last>",
         "/screenshot <id|last>",
+        "/ask <prompt>",
         "/run <prompt>",
         "/edit <prompt>",
+        "ask <prompt>",
+        "또는 그냥 문장만 보내도 자동으로 run/edit 를 판정합니다.",
+        "예: 지금 어디 연결돼 있어 / 마지막 작업 보여줘 / 최근 로그 보여줘 / 스크린샷 보내줘",
         "",
         "정책:",
         "/run 은 read-only 분석용",
@@ -899,7 +1097,7 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/where") {
+  if (command === "where") {
     const workspace = touchActiveWorkspace(db);
 
     if (!workspace || !workspace.is_active) {
@@ -924,7 +1122,7 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/engine") {
+  if (command === "engine") {
     const requestedEngine = argsText.trim().toLowerCase();
 
     if (!requestedEngine) {
@@ -944,6 +1142,7 @@ async function handleCommand(db, text) {
           `project: ${workspace.name}`,
           `engine: ${workspace.engine}`,
           "변경 방법: /engine gemini | /engine codex | /engine custom",
+          "또는: engine gemini | engine codex | engine custom",
         ].join("\n"),
         resultText: "engine current sent",
       };
@@ -969,7 +1168,7 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/status") {
+  if (command === "status") {
     const jobs = getRecentJobs(db, 5);
     const lines = jobs.length
       ? jobs.map((job) => `${job.id} — ${truncate(job.title, 24)} — ${job.status} — ${job.engine}`)
@@ -981,7 +1180,7 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/last") {
+  if (command === "last") {
     const job = getLastJob(db);
 
     if (!job) {
@@ -994,12 +1193,12 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/job") {
+  if (command === "job") {
     const jobId = argsText.trim();
 
     if (!jobId) {
       return {
-        replyText: "사용법: /job <id|last>",
+        replyText: "사용법: /job <id|last> 또는 job <id|last>",
         resultText: "job usage sent",
       };
     }
@@ -1019,12 +1218,12 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/tail") {
+  if (command === "tail") {
     const jobId = argsText.trim();
 
     if (!jobId) {
       return {
-        replyText: "사용법: /tail <id|last>",
+        replyText: "사용법: /tail <id|last> 또는 tail <id|last>",
         resultText: "tail usage sent",
       };
     }
@@ -1044,12 +1243,12 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/screenshot") {
+  if (command === "screenshot") {
     const jobId = argsText.trim();
 
     if (!jobId) {
       return {
-        replyText: "사용법: /screenshot <id|last>",
+        replyText: "사용법: /screenshot <id|last> 또는 screenshot <id|last>",
         resultText: "screenshot usage sent",
       };
     }
@@ -1084,12 +1283,12 @@ async function handleCommand(db, text) {
     };
   }
 
-  if (command === "/run") {
+  if (command === "run") {
     const prompt = argsText.trim();
 
     if (!prompt) {
       return {
-        replyText: "사용법: /run <prompt>",
+        replyText: "사용법: /run <prompt> 또는 run <prompt>",
         resultText: "run usage sent",
       };
     }
@@ -1104,59 +1303,15 @@ async function handleCommand(db, text) {
     }
 
     const workspace = workspaceResult.workspace;
-
-    const title = `Telegram run — ${truncate(prompt, 28)}`;
-    const job = createJob(db, {
-      title,
-      engine: workspace.engine,
-      mode: "run",
-      prompt: [
-        "Run mode. Stay read-only and do not modify files.",
-        "Analyze, inspect, summarize, or execute non-editing steps only.",
-        "",
-        prompt,
-      ].join("\n"),
-      workspacePath: workspace.path,
-    });
-    const logPath = createLogPath(job.id);
-    try {
-      markJobAsRunning(db, job.id, logPath);
-      launchJobRunner(job.id, workspace);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Telegram run launch failed.";
-      markJobAsFailed(db, job.id, logPath, message);
-      return {
-        replyText: `작업 실행을 시작하지 못했습니다.\nerror: ${message}`,
-        resultText: `run failed for ${job.id}`,
-      };
-    }
-
-    const detailUrl = getJobUrl(job.id);
-    const lines = [
-      "작업이 생성되고 바로 실행을 시작했습니다.",
-      `id: ${job.id}`,
-      `title: ${job.title}`,
-      `engine: ${workspace.engine}`,
-      `workspace: ${workspace.name}`,
-    ];
-
-    if (detailUrl) {
-      lines.push(`detail: ${detailUrl}`);
-    }
-
-    return {
-      replyText: lines.join("\n"),
-      resultText: `run launched for ${job.id}`,
-    };
+    return launchTelegramJob(db, workspace, "run", prompt, "run");
   }
 
-  if (command === "/edit") {
+  if (command === "edit") {
     const prompt = argsText.trim();
 
     if (!prompt) {
       return {
-        replyText: "사용법: /edit <prompt>",
+        replyText: "사용법: /edit <prompt> 또는 edit <prompt>",
         resultText: "edit usage sent",
       };
     }
@@ -1179,56 +1334,54 @@ async function handleCommand(db, text) {
     }
 
     const workspace = workspaceResult.workspace;
+    return launchTelegramJob(db, workspace, "edit", prompt, "edit");
+  }
 
-    const title = `Telegram edit — ${truncate(prompt, 27)}`;
-    const job = createJob(db, {
-      title,
-      engine: workspace.engine,
-      mode: "edit",
-      prompt: [
-        "Edit mode. File changes are allowed only inside the active workspace.",
-        "반드시 변경 파일 목록과 수정 요약을 남겨주세요.",
-        "",
-        prompt,
-      ].join("\n"),
-      workspacePath: workspace.path,
-    });
-    const logPath = createLogPath(job.id);
-    try {
-      markJobAsRunning(db, job.id, logPath);
-      launchJobRunner(job.id, workspace);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Telegram edit launch failed.";
-      markJobAsFailed(db, job.id, logPath, message);
+  if (command === "ask") {
+    const prompt = argsText.trim();
+
+    if (!prompt) {
       return {
-        replyText: `수정 작업을 시작하지 못했습니다.\nerror: ${message}`,
-        resultText: `edit failed for ${job.id}`,
+        replyText: "사용법: /ask <prompt> 또는 ask <prompt>",
+        resultText: "ask usage sent",
       };
     }
 
-    const detailUrl = getJobUrl(job.id);
-    const lines = [
-      "수정 작업이 생성되고 바로 실행을 시작했습니다.",
-      `id: ${job.id}`,
-      `title: ${job.title}`,
-      `engine: ${workspace.engine}`,
-      `workspace: ${workspace.name}`,
-      "mode: edit",
-    ];
+    const workspaceResult = getRunnableActiveWorkspace(db);
 
-    if (detailUrl) {
-      lines.push(`detail: ${detailUrl}`);
+    if (!workspaceResult.ok) {
+      return {
+        replyText: workspaceResult.error,
+        resultText: "ask blocked without workspace",
+      };
     }
 
-    return {
-      replyText: lines.join("\n"),
-      resultText: `edit launched for ${job.id}`,
-    };
+    const workspace = workspaceResult.workspace;
+    const requestedMode = detectRequestedMode(prompt);
+    return launchTelegramJob(db, workspace, requestedMode, prompt, "ask");
+  }
+
+  if (!hadSlash && !KNOWN_COMMANDS.has(command) && rawText.length >= 6) {
+    const workspaceResult = getRunnableActiveWorkspace(db);
+
+    if (!workspaceResult.ok) {
+      return {
+        replyText: workspaceResult.error,
+        resultText: "plain text blocked without workspace",
+      };
+    }
+
+    const workspace = workspaceResult.workspace;
+    const requestedMode = detectRequestedMode(rawText);
+    return launchTelegramJob(db, workspace, requestedMode, rawText, "ask");
+  }
+
+  if (!hadSlash) {
+    return { replyText: null, resultText: `ignored plain text ${rawText}` };
   }
 
   return {
-    replyText: "지원하지 않는 명령입니다. /help 를 입력하세요.",
+    replyText: "지원하지 않는 명령입니다. /help 또는 help 를 입력하세요.",
     resultText: `unsupported command ${command}`,
   };
 }
