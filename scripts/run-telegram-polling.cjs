@@ -944,7 +944,13 @@ function detectNaturalLanguageCommand(rawText) {
   if (
     (text.includes("어디") && (text.includes("연결") || text.includes("워크스페이스") || text.includes("프로젝트"))) ||
     text.includes("현재 경로") ||
-    text.includes("지금 경로")
+    text.includes("지금 경로") ||
+    lower.includes("where am i connected") ||
+    lower.includes("where is this connected") ||
+    lower.includes("which workspace") ||
+    lower.includes("current workspace") ||
+    lower.includes("what project is connected") ||
+    lower.includes("show connected workspace")
   ) {
     return { command: "where", argsText: "" };
   }
@@ -954,7 +960,16 @@ function detectNaturalLanguageCommand(rawText) {
     text.includes("로그 보여") ||
     text.includes("진행 로그") ||
     text.includes("진행상황") ||
-    text.includes("진행 상황")
+    text.includes("진행 상황") ||
+    lower.includes("recent log") ||
+    lower.includes("recent logs") ||
+    lower.includes("show logs") ||
+    lower.includes("show recent logs") ||
+    lower.includes("show me the logs") ||
+    lower.includes("show me recent logs") ||
+    lower.includes("progress log") ||
+    lower.includes("tail log") ||
+    lower.includes("tail last")
   ) {
     return { command: "tail", argsText: "last" };
   }
@@ -962,7 +977,15 @@ function detectNaturalLanguageCommand(rawText) {
   if (
     text.includes("스크린샷") ||
     ((text.includes("사진") || text.includes("이미지")) &&
-      (text.includes("보내") || text.includes("보여") || text.includes("결과")))
+      (text.includes("보내") || text.includes("보여") || text.includes("결과"))) ||
+    lower.includes("screenshot") ||
+    lower.includes("send me the screenshot") ||
+    lower.includes("show the screenshot") ||
+    lower.includes("show me the screenshot") ||
+    lower.includes("send screenshot") ||
+    lower.includes("send me the image") ||
+    lower.includes("show me the image") ||
+    lower.includes("send me the result image")
   ) {
     return { command: "screenshot", argsText: "last" };
   }
@@ -973,6 +996,20 @@ function detectNaturalLanguageCommand(rawText) {
     !text.includes("스크린샷") &&
     !text.includes("사진") &&
     !text.includes("이미지")
+  ) {
+    return { command: "last", argsText: "" };
+  }
+
+  if (
+    (lower.includes("last job") ||
+      lower.includes("latest job") ||
+      lower.includes("show last job") ||
+      lower.includes("show me the last job") ||
+      lower.includes("show the last job") ||
+      lower.includes("show latest job")) &&
+    !lower.includes("log") &&
+    !lower.includes("screenshot") &&
+    !lower.includes("image")
   ) {
     return { command: "last", argsText: "" };
   }
@@ -1008,10 +1045,49 @@ function detectNaturalLanguageCommand(rawText) {
     }
   }
 
+  if (lower.includes("engine")) {
+    if (
+      lower.includes("codex") ||
+      lower.includes("switch to codex") ||
+      lower.includes("use codex")
+    ) {
+      return { command: "engine", argsText: "codex" };
+    }
+
+    if (
+      lower.includes("gemini") ||
+      lower.includes("switch to gemini") ||
+      lower.includes("use gemini")
+    ) {
+      return { command: "engine", argsText: "gemini" };
+    }
+
+    if (
+      lower.includes("custom") ||
+      lower.includes("switch to custom") ||
+      lower.includes("use custom")
+    ) {
+      return { command: "engine", argsText: "custom" };
+    }
+
+    if (
+      lower.includes("what engine") ||
+      lower.includes("current engine") ||
+      lower.includes("which engine") ||
+      lower.includes("engine am i using")
+    ) {
+      return { command: "engine", argsText: "" };
+    }
+  }
+
   if (
     text.includes("도움말") ||
     text.includes("명령어 알려") ||
-    text.includes("사용법")
+    text.includes("사용법") ||
+    lower.includes("help") ||
+    lower.includes("show help") ||
+    lower.includes("command list") ||
+    lower.includes("how do i use")
   ) {
     return { command: "help", argsText: "" };
   }
@@ -1088,6 +1164,7 @@ async function handleCommand(db, text) {
         "ask <prompt>",
         "또는 그냥 문장만 보내도 자동으로 run/edit 를 판정합니다.",
         "예: 지금 어디 연결돼 있어 / 마지막 작업 보여줘 / 최근 로그 보여줘 / 스크린샷 보내줘",
+        "English: where am I connected / show me the last job / show recent logs / send me the screenshot",
         "",
         "정책:",
         "/run 은 read-only 분석용",

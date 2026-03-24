@@ -6,8 +6,8 @@ It is optimized for a single active workspace on your machine:
 
 - connect the current folder as the active workspace
 - check where it is from Telegram
-- run a read-only prompt with `/run`
-- make a bounded edit with `/edit`
+- send a natural-language request from Telegram
+- let veremote auto-pick read-only `run` or bounded `edit`
 - receive text summaries, changed files, and preview images
 
 This repository is not published to npm yet. For now, beta users install it from source and expose the `veremote` command with `npm link`.
@@ -18,7 +18,8 @@ What works now:
 
 - `veremote` fullscreen TUI
 - `veremote init`, `doctor`, `connect`, `status`, `disconnect`, `engine`, `preview`, `daemon`
-- Telegram commands: `/help`, `/where`, `/engine`, `/status`, `/last`, `/job`, `/tail`, `/screenshot`, `/run`, `/edit`
+- Telegram commands: `/help`, `/where`, `/engine`, `/status`, `/last`, `/job`, `/tail`, `/screenshot`, `/ask`, `/run`, `/edit`
+- Telegram natural-language input in Korean and English for common run/edit and status flows
 - Gemini as the default engine
 - Codex as an optional secondary engine
 - Web preview via localhost screenshot
@@ -109,7 +110,7 @@ TELEGRAM_POLLING_ENABLED=true
 TELEGRAM_POLLING_INTERVAL_MS=1000
 
 PUBLIC_BASE_URL=http://localhost:3000
-WORKSPACE_PREVIEW_URL=http://localhost:3000
+WORKSPACE_PREVIEW_URL=http://127.0.0.1:5173
 # WORKSPACE_PREVIEW_IMAGE_PATH=/absolute/path/to/export.png
 # VEREMOTE_ALLOWED_PREVIEW_ROOTS=/absolute/path/to/exports
 
@@ -162,11 +163,12 @@ veremote daemon
 
 In the fullscreen TUI, you can type:
 
+- `ask <prompt>`
 - `run <prompt>`
 - `edit <prompt>`
 - `engine gemini`
 - `engine codex`
-- `preview url http://localhost:3000`
+- `preview url http://127.0.0.1:5173`
 - `preview image ./export.png`
 - `preview pencil ./export.png`
 - `preview clear`
@@ -178,7 +180,6 @@ In the fullscreen TUI, you can type:
 Exit keys:
 
 - `Ctrl+C`
-- `Esc`
 - `Ctrl+D`
 
 ## Engine Switching
@@ -211,6 +212,15 @@ Telegram equivalents:
 /engine codex
 ```
 
+Natural-language equivalents also work:
+
+```text
+what engine am I using?
+switch to codex
+엔진 뭐야?
+엔진 제미나이로 바꿔줘
+```
+
 ## Preview Profiles
 
 veremote uses an explicit preview profile for each active workspace.
@@ -220,7 +230,7 @@ veremote uses an explicit preview profile for each active workspace.
 Use this when your project is running on localhost and you want a real browser screenshot:
 
 ```bash
-veremote preview url http://localhost:3000
+veremote preview url http://127.0.0.1:5173
 ```
 
 ### Image file preview
@@ -269,19 +279,53 @@ Available commands:
 /job last
 /tail last
 /screenshot last
+/ask <prompt>
 /run <prompt>
 /edit <prompt>
+```
+
+Natural-language requests also work.
+
+Examples:
+
+```text
+푸터를 더 크게 수정해줘
+히어로 섹션이 어떻게 되어있어?
+지금 어디 연결돼 있어?
+마지막 작업 보여줘
+최근 로그 보여줘
+스크린샷 보내줘
+
+make the footer bigger
+explain the hero section
+where am I connected?
+show me the last job
+show recent logs
+send me the screenshot
 ```
 
 Typical flow:
 
 1. run `veremote connect` in the project folder
 2. start `veremote` or `veremote daemon`
-3. send `/where`
-4. send `/run ...` or `/edit ...`
-5. inspect `/job last`, `/tail last`, `/screenshot last`
+3. send `where` or `지금 어디 연결돼 있어?`
+4. send a natural-language request or `/ask ...`
+5. inspect `job last`, `tail last`, `screenshot last`
 
-## `run` vs `edit`
+## `ask`, `run`, and `edit`
+
+The simplest flow is to just send a sentence.
+
+veremote will auto-pick:
+
+- `edit` when your message clearly asks to modify files
+- `run` when your message asks to inspect, explain, summarize, or check
+
+You can still force a mode when you want:
+
+- `/ask <prompt>` or `ask <prompt>` for auto mode
+- `/run <prompt>` or `run <prompt>` for read-first work
+- `/edit <prompt>` or `edit <prompt>` for bounded edits inside the active workspace
 
 `/run` and `run <prompt>` are intended for read-first work:
 
@@ -338,16 +382,16 @@ Then check:
 2. Is the daemon running through `veremote` or `veremote daemon`?
 3. Does `.env.local` have valid Telegram values?
 4. Is the selected engine actually installed on this machine?
-5. For web preview, is the localhost URL running?
+5. For web preview, is the local dev server actually running?
 6. For Pencil preview, does the PNG file really exist at the configured path?
 
 For Telegram-side inspection:
 
 ```text
-/where
-/job last
-/tail last
-/screenshot last
+where
+job last
+tail last
+screenshot last
 ```
 
 ## Beta Onboarding and Smoke Test
