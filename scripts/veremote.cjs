@@ -31,12 +31,34 @@ const PREVIEW_TYPE_LABELS = {
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
 const DEFAULT_LOGO_LINES = [
-  "                                         _   ",
-  " __   _____ _ __ _   _  __ _  ___  _   _| |_ ",
-  " \\ \\ / / _ \\ '__| | | |/ _` |/ _ \\| | | | __|",
-  "  \\ V /  __/ |  | |_| | (_| | (_) | |_| | |_ ",
-  "   \\_/ \\___|_|   \\__, |\\__, |\\___/ \\__,_|\\__|",
-  "                 |___/ |___/                 ",
+  "        ██        ",
+  "      ██  ██      ",
+  "    ██  ██  ██    ",
+  "  ██  ██████  ██ ",
+  "    ██  ██  ██    ",
+  "      ██  ██      ",
+  "        ██        ",
+  " very goût",
+];
+const LOGO_SEGMENTS = [
+  [{ text: "        ██        ", ansi: "\x1b[38;5;225m", tui: "#f3d0e3" }],
+  [{ text: "      ██  ██      ", ansi: "\x1b[38;5;224m", tui: "#f0cde0" }],
+  [{ text: "    ██  ██  ██    ", ansi: "\x1b[38;5;218m", tui: "#edbfd8" }],
+  [{ text: "  ██  ██████  ██ ", ansi: "\x1b[38;5;217m", tui: "#ebb7d4" }],
+  [{ text: "    ██  ██  ██    ", ansi: "\x1b[38;5;211m", tui: "#e6a2c8" }],
+  [{ text: "      ██  ██      ", ansi: "\x1b[38;5;205m", tui: "#dd8fbd" }],
+  [{ text: "        ██        ", ansi: "\x1b[38;5;204m", tui: "#d67eb1" }],
+  [
+    { text: "v", ansi: "\x1b[38;5;225m", tui: "#f3d0e3" },
+    { text: "e", ansi: "\x1b[38;5;224m", tui: "#f0cde0" },
+    { text: "r", ansi: "\x1b[38;5;218m", tui: "#edbfd8" },
+    { text: "y", ansi: "\x1b[38;5;217m", tui: "#ebb7d4" },
+    { text: " ", ansi: "\x1b[38;5;217m", tui: "#ebb7d4" },
+    { text: "g", ansi: "\x1b[38;5;211m", tui: "#e6a2c8" },
+    { text: "o", ansi: "\x1b[38;5;205m", tui: "#dd8fbd" },
+    { text: "û", ansi: "\x1b[38;5;204m", tui: "#d67eb1" },
+    { text: "t", ansi: "\x1b[38;5;211m", tui: "#e6a2c8" },
+  ],
 ];
 const HELP_ROWS = [
   ["ask <prompt>", "Auto-pick run or edit from your prompt"],
@@ -53,9 +75,9 @@ const ANSI = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
-  brand: "\x1b[38;5;181m",
+  brand: "\x1b[38;5;218m",
   line: "\x1b[38;5;245m",
-  label: "\x1b[38;5;109m",
+  label: "\x1b[38;5;217m",
   success: "\x1b[38;5;108m",
   warning: "\x1b[38;5;179m",
 };
@@ -64,8 +86,8 @@ const THEME = {
   panel: "#17191d",
   panelAlt: "#131519",
   border: "#4b5563",
-  brand: "#d8b8c8",
-  accent: "#96b8b1",
+  brand: "#ebb7d4",
+  accent: "#d89abf",
   text: "#f3ede5",
   muted: "#b6b0a8",
   success: "#a7c080",
@@ -258,9 +280,9 @@ function connectWorkspace(db, options = {}) {
   const selectedEngine =
     options.engine ||
     (existing &&
-    existing.is_active &&
-    existing.path === CURRENT_CWD &&
-    ALLOWED_ENGINES.has(existing.engine)
+      existing.is_active &&
+      existing.path === CURRENT_CWD &&
+      ALLOWED_ENGINES.has(existing.engine)
       ? existing.engine
       : DEFAULT_ENGINE);
   const didChange =
@@ -272,18 +294,18 @@ function connectWorkspace(db, options = {}) {
     Object.prototype.hasOwnProperty.call(options, "previewType")
       ? options.previewType
       : existing &&
-          existing.is_active &&
-          existing.path === CURRENT_CWD &&
-          existing.preview_type
+        existing.is_active &&
+        existing.path === CURRENT_CWD &&
+        existing.preview_type
         ? existing.preview_type
         : null;
   const selectedPreviewTarget =
     Object.prototype.hasOwnProperty.call(options, "previewTarget")
       ? options.previewTarget
       : existing &&
-          existing.is_active &&
-          existing.path === CURRENT_CWD &&
-          existing.preview_target
+        existing.is_active &&
+        existing.path === CURRENT_CWD &&
+        existing.preview_target
         ? existing.preview_target
         : null;
 
@@ -760,6 +782,31 @@ function readLogoLines() {
   }
 }
 
+function getLogoSpec() {
+  return LOGO_SEGMENTS;
+}
+
+function getLogoLineText(segments) {
+  return segments.map((segment) => segment.text).join("");
+}
+
+function getLogoBlockWidth(logoSpec) {
+  return Math.max(
+    0,
+    ...logoSpec.map((segments) => getTextWidth(getLogoLineText(segments))),
+  );
+}
+
+function renderCliLogoLine(segments, leftPadding) {
+  return `${" ".repeat(leftPadding)}${segments.map((segment) => paint(segment.text, ANSI.bold, segment.ansi)).join("")}`;
+}
+
+function renderTuiLogoLine(segments, leftPadding) {
+  return `${" ".repeat(leftPadding)}${segments
+    .map((segment) => `{${segment.tui}-fg}${segment.text}{/}`)
+    .join("")}`;
+}
+
 function getTextWidth(text) {
   return Array.from(text).length;
 }
@@ -807,12 +854,17 @@ function getStatusRows(workspace) {
 }
 
 function printHeader() {
-  const logoLines = readLogoLines();
+  const logoSpec = getLogoSpec();
   const viewportWidth = Math.max(64, Math.min(process.stdout.columns || 96, 120));
+  const logoBlockWidth = getLogoBlockWidth(logoSpec);
+  const leftPadding = Math.max(
+    0,
+    Math.floor((viewportWidth - logoBlockWidth) / 2),
+  );
 
   console.log("");
-  for (const line of logoLines) {
-    console.log(paint(centerText(line, viewportWidth), ANSI.bold, ANSI.brand));
+  for (const line of logoSpec) {
+    console.log(renderCliLogoLine(line, leftPadding));
   }
   console.log("");
 }
@@ -1334,12 +1386,11 @@ async function runInteractiveInit() {
     console.log(`Gemini command    ${geminiCliCommand || "-"}`);
     console.log(`Codex command     ${codexCliCommand || "-"}`);
     console.log(
-      `Preview default   ${
-        previewChoice === "web"
-          ? workspacePreviewUrl || "none"
-          : previewChoice === "none"
-            ? "none"
-            : workspacePreviewImagePath
+      `Preview default   ${previewChoice === "web"
+        ? workspacePreviewUrl || "none"
+        : previewChoice === "none"
+          ? "none"
+          : workspacePreviewImagePath
       }`,
     );
     console.log("");
@@ -1601,8 +1652,10 @@ function assertDefaultEngine() {
 }
 
 function createTuiWidgets(screen) {
-  const logoLines = readLogoLines();
-  const headerHeight = logoLines.length + 4;
+  const logoSpec = getLogoSpec();
+  const logoSymbolSpec = logoSpec.slice(0, -1);
+  const logoBlockWidth = getLogoBlockWidth(logoSpec);
+  const headerHeight = logoSymbolSpec.length + 3;
   const summaryTop = headerHeight;
   const contentTop = summaryTop + 4;
   const header = blessed.box({
@@ -1613,25 +1666,58 @@ function createTuiWidgets(screen) {
     height: headerHeight,
     style: {
       fg: THEME.text,
-      bg: THEME.panelAlt,
+      bg: THEME.bg,
     },
   });
 
   const headerTopOffset = 1;
-  logoLines.forEach((line, index) => {
+  const logoLeft = 1;
+  const textLeft = logoLeft + logoBlockWidth + 4;
+
+  logoSymbolSpec.forEach((line, index) => {
+    const lineWidth = getTextWidth(getLogoLineText(line));
+    const leftPadding = Math.max(0, Math.floor((logoBlockWidth - lineWidth) / 2));
+
     blessed.box({
       parent: header,
       top: headerTopOffset + index,
-      left: 1,
-      right: 1,
+      left: logoLeft,
+      width: logoBlockWidth,
       height: 1,
-      align: "center",
-      content: line,
+      tags: true,
+      content: renderTuiLogoLine(line, leftPadding),
       style: {
-        fg: THEME.brand,
+        bg: THEME.bg,
         bold: true,
       },
     });
+  });
+
+  blessed.box({
+    parent: header,
+    top: 1,
+    left: textLeft,
+    right: 2,
+    height: 1,
+    content: "veremote",
+    style: {
+      bg: THEME.bg,
+      fg: THEME.brand,
+      bold: true,
+    },
+  });
+
+  blessed.box({
+    parent: header,
+    top: 3,
+    left: textLeft,
+    right: 2,
+    height: 2,
+    content: "Built for lying-down coding. Control your local workspace from Telegram.",
+    style: {
+      bg: THEME.bg,
+      fg: THEME.muted,
+    },
   });
 
   const summary = blessed.box({
