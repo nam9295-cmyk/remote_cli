@@ -14,3 +14,6 @@ data/*.sqlite-shm
 data/*.sqlite-wal
 data/logs/
 data/*.pid
+cli_plan/
+docs/archive/
+docs/*.md

@@ -411,27 +411,13 @@ tail last
 screenshot last
 ```
 
-## Beta Onboarding and Smoke Test
-
-Detailed onboarding:
-
-- [docs/close-beta-onboarding.md](docs/close-beta-onboarding.md)
-
-Close-beta smoke test checklist:
-
-- [docs/close-beta-smoke-test.md](docs/close-beta-smoke-test.md)
-
 ## Repository Layout
 
 The current beta-facing surface is intentionally small:
 
 - `README.md`
 - `LICENSE`
-- `cli_plan/`
 - `docs/`
 - `scripts/`
-- `lib/`
-
-Archived dashboard-era planning documents now live under:
-
-- `docs/archive/dashboard-prototype/`
+- `assets/`
+- `data/`

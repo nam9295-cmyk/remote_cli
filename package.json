@@ -1,34 +1,21 @@
 {
-  "name": "remote-cli-dashboard",
+  "name": "veremote",
   "version": "0.1.0",
   "private": true,
   "bin": {
     "veremote": "./scripts/veremote.cjs"
   },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
+    "lint": "eslint scripts",
     "telegram:poll": "node scripts/veremote.cjs daemon",
     "veremote": "node scripts/veremote.cjs"
   },
   "dependencies": {
     "blessed": "^0.1.81",
-    "next": "16.1.7",
     "playwright": "^1.58.2",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "sharp": "^0.34.4"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "3.3.1",
-    "@tailwindcss/postcss": "4.2.1",
-    "@types/node": "24.10.1",
-    "@types/react": "19.2.2",
-    "@types/react-dom": "19.2.2",
-    "eslint": "9.39.1",
-    "eslint-config-next": "16.1.7",
-    "tailwindcss": "4.2.1",
-    "typescript": "5.9.3"
+    "eslint": "9.39.1"
   }
 }
