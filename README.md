@@ -40,7 +40,7 @@ What works now:
 - Gemini as the default engine
 - Codex as an optional secondary engine
 - Web preview via localhost screenshot
-- Pencil preview via an explicit exported PNG path
+- Fixed image preview via an explicit PNG path
 
 What this is not:
 
@@ -151,7 +151,7 @@ Recommended defaults:
 - add `CODEX_CLI_COMMAND=codex` only if Codex CLI is installed
 - leave `PUBLIC_BASE_URL` blank unless you want clickable detail links in Telegram
 - use `WORKSPACE_PREVIEW_URL` for web work
-- use `veremote preview pencil <path>` for Pencil exports instead of relying on the env file alone
+- use `veremote preview image <path>` when you want to send back a fixed PNG file
 
 ## Connect a Workspace
 
@@ -197,7 +197,6 @@ In the fullscreen TUI, you can type:
 - `engine codex`
 - `preview url http://127.0.0.1:5173`
 - `preview image ./export.png`
-- `preview pencil ./export.png`
 - `preview clear`
 - `status`
 - `where`
@@ -266,14 +265,6 @@ Use this when a fixed PNG file should be sent back:
 
 ```bash
 veremote preview image ./preview/latest.png
-```
-
-### Pencil export preview
-
-Use this when the workspace should be treated as a Pencil workflow and success depends on a real exported PNG:
-
-```bash
-veremote preview pencil ./exports/final.png
 ```
 
 ### Clear preview
@@ -364,17 +355,6 @@ You can still force a mode when you want:
 `/edit` and `edit <prompt>` are intended for bounded edits inside the active workspace.
 
 veremote does not support arbitrary path targeting outside the active workspace as part of the normal beta flow.
-
-## Pencil Policy
-
-If the workspace preview profile is `pencil_export`, the final result is judged by a real PNG.
-
-For Pencil preview jobs:
-
-- progress messages are sent during the job
-- success requires a real exported PNG
-- fallback text or a fake placeholder image does not count as success
-- if the PNG is missing, the job ends as `export_failed` or `partial`
 
 ## Logs, Database, and Preview Files
 

@@ -26,7 +26,7 @@ const ALLOWED_ENGINES = new Set(["gemini", "codex", "custom"]);
 const PREVIEW_TYPE_LABELS = {
   web_url: "web_url",
   image_file: "image_file",
-  pencil_export: "pencil_export",
+  pencil_export: "image_file",
 };
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
@@ -43,7 +43,7 @@ const HELP_ROWS = [
   ["run <prompt>", "Start a read-only job in the current workspace"],
   ["edit <prompt>", "Allow file changes inside the active workspace"],
   ["engine <name>", "Switch engine: gemini, codex, custom"],
-  ["preview ...", "Set preview policy: url, image, pencil, clear"],
+  ["preview ...", "Set preview policy: url, image, clear"],
   ["where", "Show the current workspace path and engine"],
   ["status", "Show the full workspace summary"],
   ["help", "Show the command reference"],
@@ -237,7 +237,7 @@ function getPreviewProfile(workspace) {
   }
 
   return {
-    type: workspace.preview_type,
+    type: workspace.preview_type === "pencil_export" ? "image_file" : workspace.preview_type,
     target: workspace.preview_target || null,
   };
 }
@@ -376,7 +376,7 @@ function setWorkspacePreview(db, previewType, previewTarget) {
   if (normalizedType && !normalizedTarget) {
     return {
       ok: false,
-      error: "Preview target is required for url, image, and pencil preview types.",
+      error: "Preview target is required for url and image preview types.",
       workspace,
     };
   }
@@ -642,6 +642,7 @@ function getJobSnapshot(db, jobId) {
 
 function launchJobRunner(jobId, workspace) {
   const workspacePath = workspace.path;
+  const previewProfile = getPreviewProfile(workspace);
 
   if (!isExistingDirectory(workspacePath)) {
     throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
@@ -655,8 +656,8 @@ function launchJobRunner(jobId, workspace) {
       ...process.env,
       VEREMOTE_APP_ROOT: APP_ROOT,
       VEREMOTE_WORKSPACE_PATH: workspacePath,
-      VEREMOTE_PREVIEW_TYPE: workspace.preview_type || "",
-      VEREMOTE_PREVIEW_TARGET: workspace.preview_target || "",
+      VEREMOTE_PREVIEW_TYPE: previewProfile.type || "",
+      VEREMOTE_PREVIEW_TARGET: previewProfile.target || "",
     },
   });
 
@@ -850,7 +851,7 @@ function printUsage() {
   console.log("veremote connect");
   console.log("veremote engine <gemini|codex|custom>");
   console.log("veremote preview");
-  console.log("veremote preview <url|image|pencil> <target>");
+  console.log("veremote preview <url|image> <target>");
   console.log("veremote preview <clear|none>");
   console.log("veremote status");
   console.log("veremote disconnect");
@@ -1271,11 +1272,6 @@ async function runInteractiveInit() {
           detail: "always use a fixed image file path",
         },
         {
-          key: "pencil",
-          label: "pencil",
-          detail: "require a real exported PNG for Pencil workflows",
-        },
-        {
           key: "none",
           label: "none",
           detail: "skip default preview configuration",
@@ -1299,12 +1295,10 @@ async function runInteractiveInit() {
       );
     }
 
-    if (previewChoice === "image" || previewChoice === "pencil") {
+    if (previewChoice === "image") {
       workspacePreviewImagePath = await promptWithDefault(
         rl,
-        previewChoice === "pencil"
-          ? "Pencil export PNG path"
-          : "Preview image path",
+        "Preview image path",
         defaults.workspacePreviewImagePath,
         { required: true },
       );
@@ -1805,7 +1799,7 @@ function buildHelpText() {
   lines.push("ask <prompt> auto-picks run or edit from your wording");
   lines.push("engine gemini / engine codex switches the active engine");
   lines.push("preview url http://127.0.0.1:5173 sets web screenshots");
-  lines.push("preview image ./export.png or preview pencil ./export.png sets explicit preview policy");
+  lines.push("preview image ./export.png sets an explicit preview image");
   lines.push("status / where append details to the log panel");
   lines.push("plain sentences also start a background job automatically");
   lines.push("telegram examples: where engine codex ask ... edit ... job last tail last screenshot last");
@@ -1906,6 +1900,15 @@ function parsePreviewCommandInput(rawInput) {
   }
 
   const [rawType, ...rest] = trimmed.split(/\s+/);
+
+  if (rawType === "pencil" || rawType === "export" || rawType === "pencil_export") {
+    return {
+      action: "invalid",
+      type: rawType,
+      target: rest.join(" ").trim(),
+    };
+  }
+
   const normalizedType = normalizePreviewType(rawType);
 
   if (!normalizedType && rawType !== "clear" && rawType !== "none") {
@@ -2121,7 +2124,7 @@ function startFullScreenTui(db) {
 
       if (parsed.action === "invalid") {
         appendSystem(`Unsupported preview type: ${parsed.type}`);
-        appendSystem("Usage: preview url <target> | preview image <target> | preview pencil <target> | preview clear");
+        appendSystem("Usage: preview url <target> | preview image <target> | preview clear");
         refreshSummary();
         return;
       }
@@ -2219,7 +2222,7 @@ function startFullScreenTui(db) {
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
   appendSystem("Telegram examples: where, engine codex, ask 이 프로젝트를 한 줄로 요약해줘, edit Header.tsx의 타이틀을 더 크게 수정해줘, job last, tail last, screenshot last");
-  appendSystem("Local preview examples: preview url http://127.0.0.1:5173 | preview image ./export.png | preview pencil ./export.png | preview clear");
+  appendSystem("Local preview examples: preview url http://127.0.0.1:5173 | preview image ./export.png | preview clear");
   appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
   const intervalId = setInterval(pollWatchers, 1000);
@@ -2342,7 +2345,7 @@ async function runCommandMode(command) {
     if (parsed.action === "invalid") {
       db.close();
       console.error(`Unsupported preview type: ${parsed.type}`);
-      console.log("Usage: veremote preview <url|image|pencil> <target>");
+      console.log("Usage: veremote preview <url|image> <target>");
       console.log("       veremote preview <clear|none>");
       process.exit(1);
     }
@@ -2405,7 +2408,7 @@ async function runCommandMode(command) {
     if (workspace) {
       printStatus(workspace);
       printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>, /job last, /tail last, /screenshot last");
-      printMessage("Local preview examples: veremote preview url <url> | veremote preview image <path> | veremote preview pencil <path> | veremote preview clear");
+      printMessage("Local preview examples: veremote preview url <url> | veremote preview image <path> | veremote preview clear");
     } else {
       printMessage(
         "No active workspace is connected yet. Telegram commands that require a workspace will be rejected until you run `veremote connect`.",

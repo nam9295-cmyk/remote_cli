@@ -12,7 +12,7 @@ const {
 const PREVIEW_TYPE_LABELS = {
   web_url: "web_url",
   image_file: "image_file",
-  pencil_export: "pencil_export",
+  pencil_export: "image_file",
 };
 
 const appRoot = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
@@ -309,9 +309,12 @@ function formatPreviewProfile(workspace) {
     return "none";
   }
 
+  const previewType =
+    workspace.preview_type === "pencil_export" ? "image_file" : workspace.preview_type;
+
   return workspace.preview_target
-    ? `${PREVIEW_TYPE_LABELS[workspace.preview_type] || workspace.preview_type} (${workspace.preview_target})`
-    : workspace.preview_type;
+    ? `${PREVIEW_TYPE_LABELS[previewType] || previewType} (${workspace.preview_target})`
+    : previewType;
 }
 
 function touchActiveWorkspace(db) {
@@ -442,6 +445,9 @@ function markJobAsFailed(db, jobId, logPath, message) {
 
 function launchJobRunner(jobId, workspace) {
   const workspacePath = workspace.path;
+  const previewType =
+    workspace.preview_type === "pencil_export" ? "image_file" : workspace.preview_type || "";
+  const previewTarget = workspace.preview_target || "";
 
   if (!isExistingDirectory(workspacePath)) {
     throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
@@ -455,8 +461,8 @@ function launchJobRunner(jobId, workspace) {
       ...process.env,
       VEREMOTE_APP_ROOT: appRoot,
       VEREMOTE_WORKSPACE_PATH: workspacePath,
-      VEREMOTE_PREVIEW_TYPE: workspace.preview_type || "",
-      VEREMOTE_PREVIEW_TARGET: workspace.preview_target || "",
+      VEREMOTE_PREVIEW_TYPE: previewType,
+      VEREMOTE_PREVIEW_TARGET: previewTarget,
     },
   });
   child.unref();
