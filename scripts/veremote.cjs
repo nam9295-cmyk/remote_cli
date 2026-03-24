@@ -7,6 +7,10 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const blessed = require("blessed");
+const {
+  getRunningDaemonPid,
+  isExistingDirectory,
+} = require("./veremote-guardrails.cjs");
 
 const APP_ROOT = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
@@ -29,8 +33,8 @@ const DEFAULT_LOGO_LINES = [
   "                 |___/ |___/                 ",
 ];
 const HELP_ROWS = [
-  ["run <prompt>", "Start a read-first job in the current workspace"],
-  ["edit <prompt>", "Start an editable job in the current workspace"],
+  ["run <prompt>", "Start a read-only job in the current workspace"],
+  ["edit <prompt>", "Allow file changes inside the active workspace"],
   ["engine <name>", "Switch engine: gemini, codex, custom"],
   ["where", "Show the current workspace path and engine"],
   ["status", "Show the full workspace summary"],
@@ -338,6 +342,10 @@ function buildWorkspaceTelegramText(workspace) {
     "/run 이 프로젝트를 한 줄로 요약해줘",
     "/edit Header.tsx의 메인 타이틀을 더 크게 수정해줘",
     "/screenshot job_xxx",
+    "",
+    "policy:",
+    "/run = read-only",
+    "/edit = workspace 내부 파일 수정 허용",
   ].join("\n");
 }
 
@@ -404,8 +412,8 @@ function createJob(db, input) {
   const engine = input.engine || DEFAULT_ENGINE;
   const promptWithMode =
     input.mode === "edit"
-      ? `Edit mode. You may modify files when needed.\n\n${safePrompt}`
-      : `Run mode. Focus on analysis or execution without changing files unless the prompt explicitly requires it.\n\n${safePrompt}`;
+      ? `Edit mode. File changes are allowed only inside the active workspace. Always report the changed files and the edit summary.\n\n${safePrompt}`
+      : `Run mode. Stay read-only and do not modify files. Analyze, inspect, summarize, or execute non-editing steps only.\n\n${safePrompt}`;
 
   db.prepare(`
     INSERT INTO jobs (
@@ -519,6 +527,10 @@ function getJobSnapshot(db, jobId) {
 }
 
 function launchJobRunner(jobId, workspacePath) {
+  if (!isExistingDirectory(workspacePath)) {
+    throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
+  }
+
   const child = spawn(process.execPath, [WORKER_PATH, jobId], {
     cwd: workspacePath,
     detached: true,
@@ -542,6 +554,14 @@ function queueJob(db, mode, prompt) {
   }
 
   const workspace = ensureCurrentWorkspace(db);
+
+  if (!workspace || !workspace.path || !isExistingDirectory(workspace.path)) {
+    return {
+      ok: false,
+      error: "Active workspace path is missing or unavailable. Run `veremote connect` in a valid project folder first.",
+    };
+  }
+
   const job = createJob(db, {
     mode,
     engine: workspace.engine,
@@ -955,35 +975,8 @@ function runDaemonProcess() {
   });
 }
 
-function getRunningDaemonPid() {
-  try {
-    const value = fs.readFileSync(DAEMON_PID_PATH, "utf8").trim();
-
-    if (!value) {
-      return null;
-    }
-
-    const pid = Number(value);
-
-    if (!Number.isInteger(pid) || pid <= 0) {
-      fs.rmSync(DAEMON_PID_PATH, { force: true });
-      return null;
-    }
-
-    try {
-      process.kill(pid, 0);
-      return pid;
-    } catch {
-      fs.rmSync(DAEMON_PID_PATH, { force: true });
-      return null;
-    }
-  } catch {
-    return null;
-  }
-}
-
 function ensureBackgroundDaemonStarted() {
-  const existingPid = getRunningDaemonPid();
+  const existingPid = getRunningDaemonPid(DAEMON_PID_PATH, DAEMON_PATH);
 
   if (existingPid) {
     return {
@@ -1392,7 +1385,7 @@ async function runCommandMode(command) {
 
   if (command === "daemon") {
     const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
-    const existingPid = getRunningDaemonPid();
+    const existingPid = getRunningDaemonPid(DAEMON_PID_PATH, DAEMON_PATH);
 
     if (existingPid) {
       printMessage(`veremote daemon is already running (pid ${existingPid}).`);

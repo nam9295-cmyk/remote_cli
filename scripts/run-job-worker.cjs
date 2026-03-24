@@ -8,6 +8,11 @@ const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const sharp = require("sharp");
 const { chromium } = require("playwright");
+const {
+  isExistingDirectory,
+  parseAllowedPreviewRoots,
+  resolveAllowedPreviewPath,
+} = require("./veremote-guardrails.cjs");
 
 const jobId = process.argv[2];
 const appRoot = process.env.VEREMOTE_APP_ROOT || process.cwd();
@@ -15,6 +20,10 @@ const workspacePath = process.env.VEREMOTE_WORKSPACE_PATH || process.cwd();
 const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
 const mockEngineScriptPath = path.join(appRoot, "scripts", "mock-engine.cjs");
 const FAILURE_LIKE_STATUSES = new Set(["failed", "partial", "export_failed"]);
+const ALLOWED_PREVIEW_ROOTS = parseAllowedPreviewRoots(
+  workspacePath,
+  process.env.VEREMOTE_ALLOWED_PREVIEW_ROOTS,
+);
 
 if (!jobId) {
   process.exit(1);
@@ -458,12 +467,23 @@ function createPreviewImagePath() {
 }
 
 function resolveWorkspaceAssetPath(assetPath) {
-  if (!assetPath || !assetPath.trim()) {
-    return null;
+  const resolved = resolveAllowedPreviewPath(
+    workspacePath,
+    assetPath,
+    ALLOWED_PREVIEW_ROOTS,
+  );
+
+  if (!resolved.ok) {
+    return {
+      path: null,
+      error: resolved.error,
+    };
   }
 
-  const trimmed = assetPath.trim();
-  return path.isAbsolute(trimmed) ? trimmed : path.join(workspacePath, trimmed);
+  return {
+    path: resolved.path,
+    error: null,
+  };
 }
 
 function getReferenceTime(job) {
@@ -575,9 +595,15 @@ function findLatestPngInWorkspace(rootPath, referenceTime) {
 
 function resolvePencilExportImage(job, changedFiles) {
   const referenceTime = getReferenceTime(job);
-  const configuredImagePath = resolveWorkspaceAssetPath(
+  const configuredImage = resolveWorkspaceAssetPath(
     process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
   );
+
+  if (configuredImage.error) {
+    throw new Error(configuredImage.error);
+  }
+
+  const configuredImagePath = configuredImage.path;
 
   if (
     configuredImagePath &&
@@ -687,9 +713,14 @@ async function generateBestPreviewImage(job, logStream) {
     return generatePreviewFromImageFile(sourcePath);
   }
 
-  const configuredImagePath = resolveWorkspaceAssetPath(
+  const configuredImage = resolveWorkspaceAssetPath(
     process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
   );
+  const configuredImagePath = configuredImage.path;
+
+  if (configuredImage.error) {
+    appendLine(logStream, `[worker] blocked preview image path: ${configuredImage.error}`);
+  }
 
   if (configuredImagePath) {
     if (fs.existsSync(configuredImagePath)) {
@@ -891,6 +922,23 @@ async function main() {
   const job = getJob(db);
 
   if (!job) {
+    process.exit(1);
+  }
+
+  if (!isExistingDirectory(workspacePath)) {
+    updateFailure(db, null, `Workspace path is unavailable: ${workspacePath}`, []);
+    db.close();
+    process.exit(1);
+  }
+
+  if (job.workspacePath && path.resolve(job.workspacePath) !== path.resolve(workspacePath)) {
+    updateFailure(
+      db,
+      null,
+      `Workspace mismatch detected. expected=${job.workspacePath} actual=${workspacePath}`,
+      [],
+    );
+    db.close();
     process.exit(1);
   }
 

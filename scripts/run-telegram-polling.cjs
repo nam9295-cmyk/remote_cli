@@ -6,6 +6,11 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
+const {
+  claimDaemonPidFile,
+  getRunningDaemonPid,
+  isExistingDirectory,
+} = require("./veremote-guardrails.cjs");
 
 const appRoot = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
@@ -307,6 +312,33 @@ function touchActiveWorkspace(db) {
   return getActiveWorkspace(db);
 }
 
+function getRunnableActiveWorkspace(db) {
+  const workspace = touchActiveWorkspace(db);
+
+  if (!workspace || !workspace.is_active) {
+    return {
+      ok: false,
+      error:
+        "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+      workspace: null,
+    };
+  }
+
+  if (!workspace.path || !isExistingDirectory(workspace.path)) {
+    return {
+      ok: false,
+      error:
+        "active workspace 경로를 읽을 수 없습니다.\n로컬 터미널에서 올바른 폴더에서 veremote connect 를 다시 실행해주세요.",
+      workspace,
+    };
+  }
+
+  return {
+    ok: true,
+    workspace,
+  };
+}
+
 function setActiveWorkspaceEngine(db, engine) {
   const normalized = String(engine || "").trim().toLowerCase();
 
@@ -389,6 +421,10 @@ function markJobAsFailed(db, jobId, logPath, message) {
 }
 
 function launchJobRunner(jobId, workspacePath) {
+  if (!isExistingDirectory(workspacePath)) {
+    throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
+  }
+
   const child = spawn(process.execPath, [workerPath, jobId], {
     detached: true,
     stdio: "ignore",
@@ -483,15 +519,11 @@ async function sendPhoto(imagePath, caption) {
   return payload.result;
 }
 
-function writeDaemonPidFile() {
-  fs.mkdirSync(path.dirname(DAEMON_PID_PATH), { recursive: true });
-  fs.writeFileSync(DAEMON_PID_PATH, `${process.pid}\n`, "utf8");
-}
-
 function removeDaemonPidFile() {
   try {
-    const currentValue = fs.readFileSync(DAEMON_PID_PATH, "utf8").trim();
-    if (!currentValue || Number(currentValue) === process.pid) {
+    const currentPid = getRunningDaemonPid(DAEMON_PID_PATH, __filename);
+
+    if (!currentPid || currentPid === process.pid) {
       fs.rmSync(DAEMON_PID_PATH, { force: true });
     }
   } catch {
@@ -511,6 +543,7 @@ function buildDaemonStartedText(workspace) {
     lines.push(`path: ${workspace.path}`);
     lines.push(`engine: ${workspace.engine}`);
     lines.push("commands: /where, /engine <name>, /run <prompt>, /edit <prompt>");
+    lines.push("policy: /run = read-only, /edit = workspace 내부 파일 수정 허용");
   } else {
     lines.push("workspace: none");
     lines.push("hint: run `veremote connect` locally first");
@@ -710,6 +743,10 @@ async function handleCommand(db, text) {
         "/screenshot <id>",
         "/run <prompt>",
         "/edit <prompt>",
+        "",
+        "정책:",
+        "/run 은 read-only 분석용",
+        "/edit 만 active workspace 내부 파일 수정 허용",
       ].join("\n"),
       resultText: "help sent",
     };
@@ -884,15 +921,16 @@ async function handleCommand(db, text) {
       };
     }
 
-    const workspace = touchActiveWorkspace(db);
+    const workspaceResult = getRunnableActiveWorkspace(db);
 
-    if (!workspace || !workspace.is_active) {
+    if (!workspaceResult.ok) {
       return {
-        replyText:
-          "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+        replyText: workspaceResult.error,
         resultText: "run blocked without workspace",
       };
     }
+
+    const workspace = workspaceResult.workspace;
 
     const title = `Telegram run — ${truncate(prompt, 28)}`;
     const job = createJob(db, {
@@ -900,7 +938,8 @@ async function handleCommand(db, text) {
       engine: workspace.engine,
       mode: "run",
       prompt: [
-        "Run mode. Focus on analysis or execution without changing files unless the prompt explicitly requires it.",
+        "Run mode. Stay read-only and do not modify files.",
+        "Analyze, inspect, summarize, or execute non-editing steps only.",
         "",
         prompt,
       ].join("\n"),
@@ -957,15 +996,16 @@ async function handleCommand(db, text) {
       };
     }
 
-    const workspace = touchActiveWorkspace(db);
+    const workspaceResult = getRunnableActiveWorkspace(db);
 
-    if (!workspace || !workspace.is_active) {
+    if (!workspaceResult.ok) {
       return {
-        replyText:
-          "현재 연결된 workspace가 없습니다.\n로컬 터미널에서 veremote connect 를 먼저 실행해주세요.",
+        replyText: workspaceResult.error,
         resultText: "edit blocked without workspace",
       };
     }
+
+    const workspace = workspaceResult.workspace;
 
     const title = `Telegram edit — ${truncate(prompt, 27)}`;
     const job = createJob(db, {
@@ -973,7 +1013,7 @@ async function handleCommand(db, text) {
       engine: workspace.engine,
       mode: "edit",
       prompt: [
-        "Edit mode. You may modify files when needed.",
+        "Edit mode. File changes are allowed only inside the active workspace.",
         "반드시 변경 파일 목록과 수정 요약을 남겨주세요.",
         "",
         prompt,
@@ -1026,7 +1066,14 @@ async function bootstrapTelegramPolling() {
   });
 
   const db = createDb();
-  writeDaemonPidFile();
+  const pidClaim = claimDaemonPidFile(DAEMON_PID_PATH, process.pid, __filename, appRoot);
+
+  if (!pidClaim.ok) {
+    console.log(`[telegram-polling] already running with pid=${pidClaim.pid}`);
+    db.close();
+    process.exit(0);
+  }
+
   const cleanup = () => {
     removeDaemonPidFile();
     db.close();
