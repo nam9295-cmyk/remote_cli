@@ -52,6 +52,8 @@ export interface ActiveWorkspace {
   path: string;
   name: string;
   engine: EngineId;
+  previewType: "web_url" | "image_file" | "pencil_export" | null;
+  previewTarget: string | null;
   isActive: boolean;
   connectedAt: string;
   lastHeartbeatAt: string | null;

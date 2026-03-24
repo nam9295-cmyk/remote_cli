@@ -128,6 +128,8 @@ function initializeDatabase(db: DatabaseSync) {
       path TEXT NOT NULL,
       name TEXT NOT NULL,
       engine TEXT NOT NULL CHECK (engine IN ('gemini', 'codex', 'custom')),
+      preview_type TEXT CHECK (preview_type IN ('web_url', 'image_file', 'pencil_export')),
+      preview_target TEXT,
       is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
       connected_at TEXT NOT NULL,
       last_heartbeat_at TEXT,
@@ -201,6 +203,17 @@ function initializeDatabase(db: DatabaseSync) {
     VALUES ('main', 0, NULL, NULL, NULL)
     ON CONFLICT(id) DO NOTHING
   `).run();
+
+  for (const statement of [
+    "ALTER TABLE active_workspace ADD COLUMN preview_type TEXT",
+    "ALTER TABLE active_workspace ADD COLUMN preview_target TEXT",
+  ]) {
+    try {
+      db.exec(statement);
+    } catch {
+      // Column already exists.
+    }
+  }
 
   db.prepare(`
     UPDATE jobs

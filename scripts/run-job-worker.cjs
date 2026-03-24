@@ -24,6 +24,10 @@ const ALLOWED_PREVIEW_ROOTS = parseAllowedPreviewRoots(
   workspacePath,
   process.env.VEREMOTE_ALLOWED_PREVIEW_ROOTS,
 );
+const PREVIEW_PROFILE = {
+  type: process.env.VEREMOTE_PREVIEW_TYPE?.trim() || null,
+  target: process.env.VEREMOTE_PREVIEW_TARGET?.trim() || null,
+};
 
 if (!jobId) {
   process.exit(1);
@@ -499,49 +503,33 @@ function isFreshEnough(filePath, referenceTime) {
   }
 }
 
-function hasPenFiles(rootPath, maxDepth = 3) {
-  function visit(currentPath, depth) {
-    if (depth > maxDepth) {
-      return false;
-    }
-
-    const entries = fs.readdirSync(currentPath, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const absolutePath = path.join(currentPath, entry.name);
-      const relativePath = path.relative(rootPath, absolutePath).split(path.sep).join("/");
-
-      if (!relativePath || shouldIgnoreWorkspaceEntry(relativePath)) {
-        continue;
-      }
-
-      if (entry.isFile() && entry.name.toLowerCase().endsWith(".pen")) {
-        return true;
-      }
-
-      if (entry.isDirectory() && visit(absolutePath, depth + 1)) {
-        return true;
-      }
-    }
-
-    return false;
+function getWorkspacePreviewProfile() {
+  if (PREVIEW_PROFILE.type) {
+    return PREVIEW_PROFILE;
   }
 
-  try {
-    return visit(rootPath, 0);
-  } catch {
-    return false;
+  if (process.env.WORKSPACE_PREVIEW_IMAGE_PATH?.trim()) {
+    return {
+      type: "image_file",
+      target: process.env.WORKSPACE_PREVIEW_IMAGE_PATH.trim(),
+    };
   }
+
+  if (process.env.WORKSPACE_PREVIEW_URL?.trim()) {
+    return {
+      type: "web_url",
+      target: process.env.WORKSPACE_PREVIEW_URL.trim(),
+    };
+  }
+
+  return {
+    type: null,
+    target: null,
+  };
 }
 
-function isPencilJob(job) {
-  const prompt = String(job.prompt || "").toLowerCase();
-  return (
-    Boolean(process.env.WORKSPACE_PREVIEW_IMAGE_PATH?.trim()) ||
-    prompt.includes("pencil") ||
-    prompt.includes(".pen") ||
-    hasPenFiles(job.workspacePath || workspacePath)
-  );
+function isPencilJob() {
+  return getWorkspacePreviewProfile().type === "pencil_export";
 }
 
 function parseChangedPath(entry) {
@@ -595,9 +583,8 @@ function findLatestPngInWorkspace(rootPath, referenceTime) {
 
 function resolvePencilExportImage(job, changedFiles) {
   const referenceTime = getReferenceTime(job);
-  const configuredImage = resolveWorkspaceAssetPath(
-    process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
-  );
+  const previewProfile = getWorkspacePreviewProfile();
+  const configuredImage = resolveWorkspaceAssetPath(previewProfile.target);
 
   if (configuredImage.error) {
     throw new Error(configuredImage.error);
@@ -699,7 +686,8 @@ async function generatePreviewImage(job) {
 }
 
 async function generateBestPreviewImage(job, logStream) {
-  const pencilJob = isPencilJob(job);
+  const previewProfile = getWorkspacePreviewProfile();
+  const pencilJob = isPencilJob();
   const changedFiles = Array.isArray(job.changedFiles) ? job.changedFiles : [];
 
   if (pencilJob) {
@@ -713,36 +701,66 @@ async function generateBestPreviewImage(job, logStream) {
     return generatePreviewFromImageFile(sourcePath);
   }
 
-  const configuredImage = resolveWorkspaceAssetPath(
-    process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
-  );
-  const configuredImagePath = configuredImage.path;
+  if (previewProfile.type === "image_file") {
+    const configuredImage = resolveWorkspaceAssetPath(previewProfile.target);
+    const configuredImagePath = configuredImage.path;
 
-  if (configuredImage.error) {
-    appendLine(logStream, `[worker] blocked preview image path: ${configuredImage.error}`);
-  }
+    if (configuredImage.error) {
+      appendLine(logStream, `[worker] blocked preview image path: ${configuredImage.error}`);
+    } else if (configuredImagePath) {
+      if (fs.existsSync(configuredImagePath)) {
+        appendLine(logStream, `[worker] using configured preview image: ${configuredImagePath}`);
+        return generatePreviewFromImageFile(configuredImagePath);
+      }
 
-  if (configuredImagePath) {
-    if (fs.existsSync(configuredImagePath)) {
-      appendLine(logStream, `[worker] using configured preview image: ${configuredImagePath}`);
-      return generatePreviewFromImageFile(configuredImagePath);
+      appendLine(logStream, `[worker] configured preview image missing: ${configuredImagePath}`);
     }
-
-    appendLine(logStream, `[worker] configured preview image missing: ${configuredImagePath}`);
   }
 
-  const configuredPreviewUrl =
-    (process.env.WORKSPACE_PREVIEW_URL && process.env.WORKSPACE_PREVIEW_URL.trim()) || null;
-
-  if (configuredPreviewUrl) {
+  if (previewProfile.type === "web_url") {
     try {
-      appendLine(logStream, `[worker] capturing preview url: ${configuredPreviewUrl}`);
-      return await generatePreviewFromUrl(configuredPreviewUrl);
+      appendLine(logStream, `[worker] capturing preview url: ${previewProfile.target}`);
+      return await generatePreviewFromUrl(previewProfile.target);
     } catch (error) {
       appendLine(
         logStream,
         `[worker] preview url capture failed: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+  }
+
+  if (!previewProfile.type) {
+    const configuredImage = resolveWorkspaceAssetPath(
+      process.env.WORKSPACE_PREVIEW_IMAGE_PATH,
+    );
+    const configuredImagePath = configuredImage.path;
+
+    if (configuredImage.error) {
+      appendLine(logStream, `[worker] blocked preview image path: ${configuredImage.error}`);
+    }
+
+    if (configuredImagePath) {
+      if (fs.existsSync(configuredImagePath)) {
+        appendLine(logStream, `[worker] using configured preview image: ${configuredImagePath}`);
+        return generatePreviewFromImageFile(configuredImagePath);
+      }
+
+      appendLine(logStream, `[worker] configured preview image missing: ${configuredImagePath}`);
+    }
+
+    const configuredPreviewUrl =
+      (process.env.WORKSPACE_PREVIEW_URL && process.env.WORKSPACE_PREVIEW_URL.trim()) || null;
+
+    if (configuredPreviewUrl) {
+      try {
+        appendLine(logStream, `[worker] capturing preview url: ${configuredPreviewUrl}`);
+        return await generatePreviewFromUrl(configuredPreviewUrl);
+      } catch (error) {
+        appendLine(
+          logStream,
+          `[worker] preview url capture failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -955,7 +973,7 @@ async function main() {
   appendLine(logStream, `[${new Date().toISOString()}] starting ${job.engine} runner`);
   const workspaceSnapshotBefore =
     job.mode === "edit" ? snapshotWorkspace(workspacePath) : new Map();
-  const pencilJob = isPencilJob(job);
+  const pencilJob = isPencilJob();
 
   if (pencilJob) {
     await sendTelegramProgress(job, "작업 시작", [

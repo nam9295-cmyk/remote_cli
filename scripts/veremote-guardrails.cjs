@@ -2,6 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
+const PREVIEW_TYPES = new Set(["web_url", "image_file", "pencil_export"]);
 
 function normalizeAbsolutePath(targetPath) {
   if (!targetPath || !String(targetPath).trim()) {
@@ -49,6 +50,32 @@ function parseAllowedPreviewRoots(workspacePath, rawValue) {
     .map((value) => (path.isAbsolute(value) ? value : path.join(workspacePath, value)))
     .map((value) => normalizeAbsolutePath(value))
     .filter(Boolean);
+}
+
+function normalizePreviewType(rawType) {
+  const value = String(rawType || "").trim().toLowerCase();
+
+  if (!value || value === "none" || value === "clear" || value === "off") {
+    return null;
+  }
+
+  if (value === "url" || value === "web") {
+    return "web_url";
+  }
+
+  if (value === "image" || value === "file") {
+    return "image_file";
+  }
+
+  if (value === "pencil" || value === "export") {
+    return "pencil_export";
+  }
+
+  if (PREVIEW_TYPES.has(value)) {
+    return value;
+  }
+
+  return null;
 }
 
 function resolveAllowedPreviewPath(workspacePath, assetPath, allowedRoots = []) {
@@ -221,6 +248,7 @@ module.exports = {
   getRunningDaemonPid,
   isExistingDirectory,
   isPathInside,
+  normalizePreviewType,
   normalizeAbsolutePath,
   parseAllowedPreviewRoots,
   removePidFile,

@@ -11,6 +11,11 @@ const {
   getRunningDaemonPid,
   isExistingDirectory,
 } = require("./veremote-guardrails.cjs");
+const PREVIEW_TYPE_LABELS = {
+  web_url: "web_url",
+  image_file: "image_file",
+  pencil_export: "pencil_export",
+};
 
 const appRoot = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
@@ -25,6 +30,9 @@ const databasePath = path.join(appRoot, "data", "remote-cli.sqlite");
 const workerPath = path.join(appRoot, "scripts", "run-job-worker.cjs");
 const logsDir = path.join(appRoot, "data", "logs");
 const ALLOWED_ENGINES = new Set(["gemini", "codex", "custom"]);
+const RUNNING_JOB_STALE_MS = Number(
+  process.env.VEREMOTE_RUNNING_JOB_STALE_MS || String(45 * 60 * 1000),
+);
 
 function getJobsTableSql(db) {
   const row = db
@@ -159,6 +167,8 @@ function createDb() {
       path TEXT NOT NULL,
       name TEXT NOT NULL,
       engine TEXT NOT NULL CHECK (engine IN ('gemini', 'codex', 'custom')),
+      preview_type TEXT CHECK (preview_type IN ('web_url', 'image_file', 'pencil_export')),
+      preview_target TEXT,
       is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
       connected_at TEXT NOT NULL,
       last_heartbeat_at TEXT,
@@ -180,6 +190,8 @@ function createDb() {
     "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
     "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
     "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE active_workspace ADD COLUMN preview_type TEXT",
+    "ALTER TABLE active_workspace ADD COLUMN preview_target TEXT",
   ];
 
   for (const statement of migrationStatements) {
@@ -292,6 +304,16 @@ function createJob(db, input) {
 
 function getActiveWorkspace(db) {
   return db.prepare("SELECT * FROM active_workspace WHERE id = 'main'").get();
+}
+
+function formatPreviewProfile(workspace) {
+  if (!workspace || !workspace.preview_type) {
+    return "none";
+  }
+
+  return workspace.preview_target
+    ? `${PREVIEW_TYPE_LABELS[workspace.preview_type] || workspace.preview_type} (${workspace.preview_target})`
+    : workspace.preview_type;
 }
 
 function touchActiveWorkspace(db) {
@@ -420,7 +442,9 @@ function markJobAsFailed(db, jobId, logPath, message) {
   );
 }
 
-function launchJobRunner(jobId, workspacePath) {
+function launchJobRunner(jobId, workspace) {
+  const workspacePath = workspace.path;
+
   if (!isExistingDirectory(workspacePath)) {
     throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
   }
@@ -433,6 +457,8 @@ function launchJobRunner(jobId, workspacePath) {
       ...process.env,
       VEREMOTE_APP_ROOT: appRoot,
       VEREMOTE_WORKSPACE_PATH: workspacePath,
+      VEREMOTE_PREVIEW_TYPE: workspace.preview_type || "",
+      VEREMOTE_PREVIEW_TARGET: workspace.preview_target || "",
     },
   });
   child.unref();
@@ -452,6 +478,20 @@ function getLastJob(db) {
 
 function getJobById(db, jobId) {
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
+}
+
+function resolveJobReference(db, rawReference) {
+  const reference = String(rawReference || "").trim();
+
+  if (!reference) {
+    return null;
+  }
+
+  if (reference.toLowerCase() === "last") {
+    return getLastJob(db);
+  }
+
+  return getJobById(db, reference);
 }
 
 function getJobUrl(jobId) {
@@ -542,7 +582,8 @@ function buildDaemonStartedText(workspace) {
     lines.push(`project: ${workspace.name}`);
     lines.push(`path: ${workspace.path}`);
     lines.push(`engine: ${workspace.engine}`);
-    lines.push("commands: /where, /engine <name>, /run <prompt>, /edit <prompt>");
+    lines.push(`preview: ${formatPreviewProfile(workspace)}`);
+    lines.push("commands: /where, /engine <name>, /run <prompt>, /edit <prompt>, /job last, /tail last");
     lines.push("policy: /run = read-only, /edit = workspace 내부 파일 수정 허용");
   } else {
     lines.push("workspace: none");
@@ -659,6 +700,41 @@ function readLogTail(logPath, lineCount = 10) {
   }
 }
 
+function buildTailReply(job) {
+  const lines = [
+    `id: ${job.id}`,
+    `title: ${job.title}`,
+    `status: ${job.status}`,
+    `engine: ${job.engine}`,
+  ];
+
+  if (job.mode) {
+    lines.push(`mode: ${job.mode}`);
+  }
+
+  lines.push(`started: ${formatTimestamp(job.started_at || job.created_at)}`);
+
+  const elapsed = formatElapsed(job.started_at);
+  if (elapsed) {
+    lines.push(`elapsed: ${elapsed}`);
+  }
+
+  const logTail = readLogTail(job.log_path, 14);
+
+  if (logTail.lines.length > 0) {
+    lines.push("tail:");
+    lines.push(logTail.lines.join("\n"));
+  } else {
+    lines.push(`tail: ${logTail.fallback}`);
+  }
+
+  if (job.preview_image_path) {
+    lines.push(`preview: ${job.preview_image_path}`);
+  }
+
+  return lines.join("\n");
+}
+
 function buildJobReply(job) {
   const detailUrl = getJobUrl(job.id);
   const lines = [
@@ -723,6 +799,76 @@ function buildJobReply(job) {
   return lines.join("\n");
 }
 
+function getTimestampMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function isRunningJobStale(job, nowMs) {
+  if (!job || job.status !== "running") {
+    return false;
+  }
+
+  const referenceMs =
+    getTimestampMs(job.started_at) ||
+    getTimestampMs(job.updated_at) ||
+    getTimestampMs(job.created_at);
+
+  if (!referenceMs || nowMs - referenceMs < RUNNING_JOB_STALE_MS) {
+    return false;
+  }
+
+  if (!job.log_path || !fs.existsSync(job.log_path)) {
+    return true;
+  }
+
+  try {
+    const stats = fs.statSync(job.log_path);
+    return nowMs - stats.mtimeMs >= RUNNING_JOB_STALE_MS;
+  } catch {
+    return true;
+  }
+}
+
+function recoverStaleRunningJobs(db) {
+  const runningJobs = db
+    .prepare("SELECT * FROM jobs WHERE status = 'running'")
+    .all();
+  const nowMs = Date.now();
+  let recoveredCount = 0;
+
+  for (const job of runningJobs) {
+    if (!isRunningJobStale(job, nowMs)) {
+      continue;
+    }
+
+    const nowIso = new Date(nowMs).toISOString();
+    db.prepare(`
+      UPDATE jobs
+      SET
+        status = 'failed',
+        updated_at = ?,
+        finished_at = ?,
+        result_summary = ?,
+        error_message = ?
+      WHERE id = ?
+    `).run(
+      nowIso,
+      nowIso,
+      "실행 중이던 작업이 응답 없이 오래 유지되어 failed 로 복구되었습니다.",
+      "stale running job recovered by telegram daemon",
+      job.id,
+    );
+    recoveredCount += 1;
+  }
+
+  return recoveredCount;
+}
+
 async function handleCommand(db, text) {
   const { command, argsText, rawText } = normalizeCommand(text);
 
@@ -739,8 +885,9 @@ async function handleCommand(db, text) {
         "/engine <name>",
         "/status",
         "/last",
-        "/job <id>",
-        "/screenshot <id>",
+        "/job <id|last>",
+        "/tail <id|last>",
+        "/screenshot <id|last>",
         "/run <prompt>",
         "/edit <prompt>",
         "",
@@ -769,6 +916,7 @@ async function handleCommand(db, text) {
         `project: ${workspace.name}`,
         `path: ${workspace.path}`,
         `engine: ${workspace.engine}`,
+        `preview: ${formatPreviewProfile(workspace)}`,
         `status: ${workspace.is_active ? "active" : "inactive"}`,
         `last active: ${formatTimestamp(workspace.last_heartbeat_at || workspace.connected_at)}`,
       ].join("\n"),
@@ -851,12 +999,12 @@ async function handleCommand(db, text) {
 
     if (!jobId) {
       return {
-        replyText: "사용법: /job <id>",
+        replyText: "사용법: /job <id|last>",
         resultText: "job usage sent",
       };
     }
 
-    const job = getJobById(db, jobId);
+    const job = resolveJobReference(db, jobId);
 
     if (!job) {
       return {
@@ -871,17 +1019,42 @@ async function handleCommand(db, text) {
     };
   }
 
+  if (command === "/tail") {
+    const jobId = argsText.trim();
+
+    if (!jobId) {
+      return {
+        replyText: "사용법: /tail <id|last>",
+        resultText: "tail usage sent",
+      };
+    }
+
+    const job = resolveJobReference(db, jobId);
+
+    if (!job) {
+      return {
+        replyText: `작업을 찾을 수 없습니다: ${jobId}`,
+        resultText: `tail job not found ${jobId}`,
+      };
+    }
+
+    return {
+      replyText: buildTailReply(job),
+      resultText: `tail sent for ${job.id}`,
+    };
+  }
+
   if (command === "/screenshot") {
     const jobId = argsText.trim();
 
     if (!jobId) {
       return {
-        replyText: "사용법: /screenshot <id>",
+        replyText: "사용법: /screenshot <id|last>",
         resultText: "screenshot usage sent",
       };
     }
 
-    const job = getJobById(db, jobId);
+    const job = resolveJobReference(db, jobId);
 
     if (!job) {
       return {
@@ -948,7 +1121,7 @@ async function handleCommand(db, text) {
     const logPath = createLogPath(job.id);
     try {
       markJobAsRunning(db, job.id, logPath);
-      launchJobRunner(job.id, workspace.path);
+      launchJobRunner(job.id, workspace);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Telegram run launch failed.";
@@ -1023,7 +1196,7 @@ async function handleCommand(db, text) {
     const logPath = createLogPath(job.id);
     try {
       markJobAsRunning(db, job.id, logPath);
-      launchJobRunner(job.id, workspace.path);
+      launchJobRunner(job.id, workspace);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Telegram edit launch failed.";
@@ -1089,6 +1262,7 @@ async function bootstrapTelegramPolling() {
   });
   console.log(`[telegram-polling] started. interval=${pollingIntervalMs}ms`);
   const workspace = getActiveWorkspace(db);
+  const recoveredCount = recoverStaleRunningJobs(db);
 
   if (workspace && workspace.is_active) {
     console.log(
@@ -1104,8 +1278,13 @@ async function bootstrapTelegramPolling() {
     console.error("[telegram-polling] failed to send startup message", error);
   }
 
+  if (recoveredCount > 0) {
+    console.log(`[telegram-polling] recovered stale running jobs=${recoveredCount}`);
+  }
+
   while (true) {
     try {
+      const recoveredOnTick = recoverStaleRunningJobs(db);
       const state = getState(db);
       const updates = await getUpdates((state.last_update_id || 0) + 1);
       const polledAt = new Date().toISOString();
@@ -1113,6 +1292,10 @@ async function bootstrapTelegramPolling() {
       updateState(db, {
         lastPolledAt: polledAt,
       });
+
+      if (recoveredOnTick > 0) {
+        console.log(`[telegram-polling] recovered stale running jobs=${recoveredOnTick}`);
+      }
 
       for (const update of updates) {
         const updateId = update.update_id;

@@ -4,17 +4,19 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { DatabaseSync } = require("node:sqlite");
 const blessed = require("blessed");
 const {
   getRunningDaemonPid,
   isExistingDirectory,
+  normalizePreviewType,
 } = require("./veremote-guardrails.cjs");
 
 const APP_ROOT = process.env.VEREMOTE_APP_ROOT || path.resolve(__dirname, "..");
 loadLocalEnvFile();
 const DATABASE_PATH = path.join(APP_ROOT, "data", "remote-cli.sqlite");
+const ENV_PATH = path.join(APP_ROOT, ".env.local");
 const WORKER_PATH = path.join(APP_ROOT, "scripts", "run-job-worker.cjs");
 const DAEMON_PATH = path.join(APP_ROOT, "scripts", "run-telegram-polling.cjs");
 const DAEMON_PID_PATH = path.join(APP_ROOT, "data", "veremote-daemon.pid");
@@ -22,6 +24,11 @@ const LOGO_PATH = path.join(APP_ROOT, "assets", "logo.txt");
 const CURRENT_CWD = process.cwd();
 const DEFAULT_ENGINE = "gemini";
 const ALLOWED_ENGINES = new Set(["gemini", "codex", "custom"]);
+const PREVIEW_TYPE_LABELS = {
+  web_url: "web_url",
+  image_file: "image_file",
+  pencil_export: "pencil_export",
+};
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_CHAT_ID.trim();
 const DEFAULT_LOGO_LINES = [
@@ -36,6 +43,7 @@ const HELP_ROWS = [
   ["run <prompt>", "Start a read-only job in the current workspace"],
   ["edit <prompt>", "Allow file changes inside the active workspace"],
   ["engine <name>", "Switch engine: gemini, codex, custom"],
+  ["preview ...", "Set preview policy: url, image, pencil, clear"],
   ["where", "Show the current workspace path and engine"],
   ["status", "Show the full workspace summary"],
   ["help", "Show the command reference"],
@@ -177,6 +185,8 @@ function ensureDb() {
       path TEXT NOT NULL,
       name TEXT NOT NULL,
       engine TEXT NOT NULL CHECK (engine IN ('gemini', 'codex', 'custom')),
+      preview_type TEXT CHECK (preview_type IN ('web_url', 'image_file', 'pencil_export')),
+      preview_target TEXT,
       is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
       connected_at TEXT NOT NULL,
       last_heartbeat_at TEXT,
@@ -188,6 +198,8 @@ function ensureDb() {
     "ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'run' CHECK (mode IN ('run', 'edit'))",
     "ALTER TABLE jobs ADD COLUMN workspace_path TEXT",
     "ALTER TABLE jobs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE active_workspace ADD COLUMN preview_type TEXT",
+    "ALTER TABLE active_workspace ADD COLUMN preview_target TEXT",
   ];
 
   for (const statement of migrationStatements) {
@@ -214,6 +226,30 @@ function getActiveWorkspace(db) {
   );
 }
 
+function getPreviewProfile(workspace) {
+  if (!workspace || !workspace.preview_type) {
+    return {
+      type: null,
+      target: null,
+    };
+  }
+
+  return {
+    type: workspace.preview_type,
+    target: workspace.preview_target || null,
+  };
+}
+
+function formatPreviewProfile(workspace) {
+  const profile = getPreviewProfile(workspace);
+
+  if (!profile.type) {
+    return "none";
+  }
+
+  return profile.target ? `${PREVIEW_TYPE_LABELS[profile.type] || profile.type} (${profile.target})` : profile.type;
+}
+
 function connectWorkspace(db, options = {}) {
   const now = new Date().toISOString();
   const existing = getActiveWorkspace(db);
@@ -230,6 +266,24 @@ function connectWorkspace(db, options = {}) {
     !existing.is_active ||
     existing.path !== CURRENT_CWD ||
     existing.engine !== selectedEngine;
+  const selectedPreviewType =
+    Object.prototype.hasOwnProperty.call(options, "previewType")
+      ? options.previewType
+      : existing &&
+          existing.is_active &&
+          existing.path === CURRENT_CWD &&
+          existing.preview_type
+        ? existing.preview_type
+        : null;
+  const selectedPreviewTarget =
+    Object.prototype.hasOwnProperty.call(options, "previewTarget")
+      ? options.previewTarget
+      : existing &&
+          existing.is_active &&
+          existing.path === CURRENT_CWD &&
+          existing.preview_target
+        ? existing.preview_target
+        : null;
 
   db.prepare(`
     INSERT INTO active_workspace (
@@ -237,16 +291,20 @@ function connectWorkspace(db, options = {}) {
       path,
       name,
       engine,
+      preview_type,
+      preview_target,
       is_active,
       connected_at,
       last_heartbeat_at,
       chat_id
     )
-    VALUES ('main', ?, ?, ?, 1, ?, ?, ?)
+    VALUES ('main', ?, ?, ?, ?, ?, 1, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       path = excluded.path,
       name = excluded.name,
       engine = excluded.engine,
+      preview_type = excluded.preview_type,
+      preview_target = excluded.preview_target,
       is_active = excluded.is_active,
       connected_at = excluded.connected_at,
       last_heartbeat_at = excluded.last_heartbeat_at,
@@ -255,6 +313,8 @@ function connectWorkspace(db, options = {}) {
     CURRENT_CWD,
     getWorkspaceName(CURRENT_CWD),
     selectedEngine,
+    selectedPreviewType,
+    selectedPreviewTarget,
     now,
     now,
     TELEGRAM_CHAT_ID || null,
@@ -284,6 +344,55 @@ function setWorkspaceEngine(db, engine) {
     workspace: result.workspace,
     didChange: result.didChange,
     replacedPath: result.replacedPath,
+  };
+}
+
+function setWorkspacePreview(db, previewType, previewTarget) {
+  const normalizedType = normalizePreviewType(previewType);
+  const workspace = getActiveWorkspace(db);
+
+  if (!workspace || !workspace.is_active) {
+    return {
+      ok: false,
+      error: "No active workspace is connected yet.",
+      workspace: null,
+    };
+  }
+
+  if (previewType && !normalizedType && String(previewType || "").trim()) {
+    return {
+      ok: false,
+      error: `Unsupported preview type: ${previewType}`,
+      workspace,
+    };
+  }
+
+  const normalizedTarget = normalizedType
+    ? String(previewTarget || "").trim()
+    : null;
+
+  if (normalizedType && !normalizedTarget) {
+    return {
+      ok: false,
+      error: "Preview target is required for url, image, and pencil preview types.",
+      workspace,
+    };
+  }
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE active_workspace
+    SET
+      preview_type = ?,
+      preview_target = ?,
+      last_heartbeat_at = ?,
+      chat_id = COALESCE(?, chat_id)
+    WHERE id = 'main'
+  `).run(normalizedType, normalizedTarget, now, TELEGRAM_CHAT_ID || null);
+
+  return {
+    ok: true,
+    workspace: getActiveWorkspace(db),
   };
 }
 
@@ -334,6 +443,7 @@ function buildWorkspaceTelegramText(workspace) {
     `project: ${workspace.name}`,
     `path: ${workspace.path}`,
     `engine: ${workspace.engine}`,
+    `preview: ${formatPreviewProfile(workspace)}`,
     "",
     "commands:",
     "/where",
@@ -341,7 +451,9 @@ function buildWorkspaceTelegramText(workspace) {
     "/engine codex",
     "/run 이 프로젝트를 한 줄로 요약해줘",
     "/edit Header.tsx의 메인 타이틀을 더 크게 수정해줘",
-    "/screenshot job_xxx",
+    "/job last",
+    "/tail last",
+    "/screenshot last",
     "",
     "policy:",
     "/run = read-only",
@@ -526,7 +638,9 @@ function getJobSnapshot(db, jobId) {
   );
 }
 
-function launchJobRunner(jobId, workspacePath) {
+function launchJobRunner(jobId, workspace) {
+  const workspacePath = workspace.path;
+
   if (!isExistingDirectory(workspacePath)) {
     throw new Error(`Active workspace path is not a readable directory: ${workspacePath}`);
   }
@@ -539,6 +653,8 @@ function launchJobRunner(jobId, workspacePath) {
       ...process.env,
       VEREMOTE_APP_ROOT: APP_ROOT,
       VEREMOTE_WORKSPACE_PATH: workspacePath,
+      VEREMOTE_PREVIEW_TYPE: workspace.preview_type || "",
+      VEREMOTE_PREVIEW_TARGET: workspace.preview_target || "",
     },
   });
 
@@ -572,7 +688,7 @@ function queueJob(db, mode, prompt) {
 
   try {
     markJobAsRunning(db, job.id, logPath);
-    launchJobRunner(job.id, workspace.path);
+    launchJobRunner(job.id, workspace);
 
     return {
       ok: true,
@@ -668,6 +784,7 @@ function getStatusRows(workspace) {
     ["Active path", workspace ? workspace.path : "-"],
     ["Active name", workspace ? workspace.name : "-"],
     ["Active engine", workspace ? workspace.engine : DEFAULT_ENGINE],
+    ["Preview", workspace ? formatPreviewProfile(workspace) : "none"],
     ["Connected at", workspace ? formatTimestamp(workspace.connected_at) : "-"],
     [
       "Heartbeat",
@@ -721,8 +838,13 @@ function printUsage() {
   console.log(paint("Usage", ANSI.label));
   console.log(paint("─────", ANSI.line));
   console.log("veremote");
+  console.log("veremote init");
+  console.log("veremote doctor");
   console.log("veremote connect");
   console.log("veremote engine <gemini|codex|custom>");
+  console.log("veremote preview");
+  console.log("veremote preview <url|image|pencil> <target>");
+  console.log("veremote preview <clear|none>");
   console.log("veremote status");
   console.log("veremote disconnect");
   console.log("veremote daemon");
@@ -738,6 +860,355 @@ function printHelp() {
   }
 
   console.log("");
+  console.log(paint("Setup", ANSI.label));
+  console.log(paint("─────", ANSI.line));
+  console.log(`${paint("init".padEnd(15), ANSI.bold)} Create a starter .env.local if missing`);
+  console.log(`${paint("doctor".padEnd(15), ANSI.bold)} Check env, engines, playwright, db, daemon`);
+  console.log("");
+}
+
+function splitCommandString(command) {
+  const parts = String(command || "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return parts.map((part) => part.replace(/^["']|["']$/g, ""));
+}
+
+function getConfiguredCommand(envKey, fallbackCommand) {
+  const raw = process.env[envKey] && process.env[envKey].trim();
+
+  if (!raw) {
+    return {
+      raw: fallbackCommand,
+      binary: fallbackCommand,
+      source: "default",
+    };
+  }
+
+  const [binary] = splitCommandString(raw);
+  return {
+    raw,
+    binary: binary || fallbackCommand,
+    source: envKey,
+  };
+}
+
+function getEnvTemplate() {
+  return [
+    "# veremote local configuration",
+    "# Fill in the values you actually use, then run `veremote doctor`.",
+    "",
+    "TELEGRAM_BOT_TOKEN=",
+    "TELEGRAM_CHAT_ID=",
+    "TELEGRAM_POLLING_ENABLED=true",
+    "TELEGRAM_POLLING_INTERVAL_MS=1000",
+    "",
+    "# Web detail links / localhost screenshot target",
+    "PUBLIC_BASE_URL=http://localhost:3000",
+    "WORKSPACE_PREVIEW_URL=http://localhost:3000",
+    "",
+    "# Optional: use a real exported PNG instead of localhost capture",
+    "# WORKSPACE_PREVIEW_IMAGE_PATH=/absolute/path/to/export.png",
+    "",
+    "# Optional: allow preview files outside the workspace root",
+    "# VEREMOTE_ALLOWED_PREVIEW_ROOTS=/absolute/path/to/exports",
+    "",
+    "# Engines",
+    "GEMINI_CLI_COMMAND=gemini",
+    "CODEX_CLI_COMMAND=codex",
+    "# CUSTOM_CLI_COMMAND=",
+    "",
+  ].join("\n");
+}
+
+function writeInitEnvFile() {
+  if (fs.existsSync(ENV_PATH)) {
+    return {
+      created: false,
+      path: ENV_PATH,
+    };
+  }
+
+  fs.writeFileSync(ENV_PATH, getEnvTemplate(), "utf8");
+  return {
+    created: true,
+    path: ENV_PATH,
+  };
+}
+
+function ensureSupportDirectories() {
+  const directories = [
+    path.dirname(DATABASE_PATH),
+    path.join(APP_ROOT, "data", "logs"),
+  ];
+
+  for (const directory of directories) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+}
+
+function canWriteToDirectory(directoryPath) {
+  try {
+    fs.mkdirSync(directoryPath, { recursive: true });
+    const probePath = path.join(directoryPath, `.veremote-write-check-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probePath, "ok", "utf8");
+    fs.rmSync(probePath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getCommandPath(binary) {
+  if (!binary) {
+    return null;
+  }
+
+  const result = spawnSync("which", [binary], {
+    encoding: "utf8",
+  });
+
+  if (result.status !== 0) {
+    return null;
+  }
+
+  return (result.stdout || "").trim() || null;
+}
+
+function runQuickNodeCheck(script) {
+  const result = spawnSync(process.execPath, ["-e", script], {
+    cwd: APP_ROOT,
+    encoding: "utf8",
+    timeout: 20000,
+  });
+
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout || ""}${result.stderr || ""}`.trim(),
+  };
+}
+
+function createDoctorCheck(status, label, detail) {
+  return { status, label, detail };
+}
+
+function printDoctorChecks(checks) {
+  console.log(paint("Doctor", ANSI.label));
+  console.log(paint("──────", ANSI.line));
+
+  const counts = {
+    ok: 0,
+    warn: 0,
+    fail: 0,
+  };
+
+  for (const check of checks) {
+    counts[check.status] += 1;
+    const tag =
+      check.status === "ok"
+        ? paint("OK  ", ANSI.success)
+        : check.status === "warn"
+          ? paint("WARN", ANSI.warning)
+          : paint("FAIL", "\x1b[38;5;203m");
+    console.log(`${tag} ${check.label}`);
+    if (check.detail) {
+      console.log(`     ${check.detail}`);
+    }
+  }
+
+  console.log("");
+  console.log(
+    `summary: ok ${counts.ok} | warn ${counts.warn} | fail ${counts.fail}`,
+  );
+  console.log("");
+}
+
+function runInitCommand() {
+  ensureSupportDirectories();
+  const result = writeInitEnvFile();
+
+  printMessage(
+    result.created
+      ? `Created ${result.path}`
+      : `${result.path} already exists. Left it unchanged.`,
+  );
+
+  console.log(paint("Next", ANSI.label));
+  console.log(paint("────", ANSI.line));
+  console.log(`1. Open ${result.path} and fill in the values you need.`);
+  console.log("2. Run `veremote doctor`.");
+  console.log("3. Run `veremote connect` in your project folder.");
+  console.log("");
+}
+
+function runDoctorCommand() {
+  ensureSupportDirectories();
+
+  const db = ensureDb();
+  const workspace = getActiveWorkspace(db);
+  const daemonPid = getRunningDaemonPid(DAEMON_PID_PATH, DAEMON_PATH);
+  const geminiConfig = getConfiguredCommand("GEMINI_CLI_COMMAND", "gemini");
+  const codexConfig = getConfiguredCommand("CODEX_CLI_COMMAND", "codex");
+  const npmVersion = spawnSync("npm", ["--version"], { encoding: "utf8" });
+  const playwrightModuleCheck = runQuickNodeCheck(
+    "try { require('playwright'); console.log('playwright module ok'); } catch (error) { console.error(error.message); process.exit(1); }",
+  );
+  const chromiumCheck = runQuickNodeCheck(
+    "const { chromium } = require('playwright'); chromium.launch({ headless: true }).then(async (browser) => { await browser.close(); console.log('chromium launch ok'); }).catch((error) => { console.error(error.message); process.exit(1); });",
+  );
+
+  const checks = [];
+
+  checks.push(
+    createDoctorCheck(
+      process.version ? "ok" : "fail",
+      `Node.js ${process.version}`,
+      `binary: ${process.execPath}`,
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      npmVersion.status === 0 ? "ok" : "fail",
+      "npm availability",
+      npmVersion.status === 0
+        ? `version: ${(npmVersion.stdout || "").trim()}`
+        : (npmVersion.stderr || npmVersion.error?.message || "npm command failed").trim(),
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      fs.existsSync(ENV_PATH) ? "ok" : "warn",
+      ".env.local",
+      fs.existsSync(ENV_PATH)
+        ? `found at ${ENV_PATH}`
+        : `missing. Run \`veremote init\` to create ${ENV_PATH}`,
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      process.env.TELEGRAM_BOT_TOKEN?.trim() ? "ok" : "warn",
+      "Telegram bot token",
+      process.env.TELEGRAM_BOT_TOKEN?.trim()
+        ? "configured"
+        : "missing TELEGRAM_BOT_TOKEN",
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      process.env.TELEGRAM_CHAT_ID?.trim() ? "ok" : "warn",
+      "Telegram chat id",
+      process.env.TELEGRAM_CHAT_ID?.trim()
+        ? `configured: ${process.env.TELEGRAM_CHAT_ID.trim()}`
+        : "missing TELEGRAM_CHAT_ID",
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      process.env.TELEGRAM_POLLING_ENABLED === "true" ? "ok" : "warn",
+      "Telegram polling",
+      process.env.TELEGRAM_POLLING_ENABLED === "true"
+        ? `enabled (${process.env.TELEGRAM_POLLING_INTERVAL_MS || "3000"}ms)`
+        : "disabled. Set TELEGRAM_POLLING_ENABLED=true",
+    ),
+  );
+
+  for (const commandConfig of [geminiConfig, codexConfig]) {
+    const resolvedPath = getCommandPath(commandConfig.binary);
+    checks.push(
+      createDoctorCheck(
+        resolvedPath ? "ok" : "warn",
+        `${commandConfig.binary} command`,
+        resolvedPath
+          ? `${commandConfig.source}: ${resolvedPath}`
+          : `not found for ${commandConfig.source === "default" ? "default command" : commandConfig.source} (${commandConfig.raw})`,
+      ),
+    );
+  }
+
+  checks.push(
+    createDoctorCheck(
+      playwrightModuleCheck.ok ? "ok" : "warn",
+      "Playwright package",
+      playwrightModuleCheck.ok ? playwrightModuleCheck.output : playwrightModuleCheck.output || "playwright module missing",
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      chromiumCheck.ok ? "ok" : "warn",
+      "Playwright Chromium",
+      chromiumCheck.ok
+        ? chromiumCheck.output
+        : `${chromiumCheck.output || "chromium launch failed"} | try: npx playwright install chromium`,
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      canWriteToDirectory(path.dirname(DATABASE_PATH)) ? "ok" : "fail",
+      "Database directory write access",
+      path.dirname(DATABASE_PATH),
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      workspace && workspace.is_active ? "ok" : "warn",
+      "Active workspace",
+      workspace && workspace.is_active
+        ? `${workspace.path} (${workspace.engine})`
+        : "no active workspace. Run `veremote connect` in your project folder",
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      workspace && workspace.preview_type ? "ok" : "warn",
+      "Workspace preview profile",
+      workspace ? formatPreviewProfile(workspace) : "none",
+    ),
+  );
+
+  checks.push(
+    createDoctorCheck(
+      daemonPid ? "ok" : "warn",
+      "Telegram daemon",
+      daemonPid
+        ? `running (pid ${daemonPid})`
+        : "not running. Start with `veremote daemon` or open `veremote`",
+    ),
+  );
+
+  if (process.env.WORKSPACE_PREVIEW_URL?.trim()) {
+    checks.push(
+      createDoctorCheck(
+        "ok",
+        "Preview URL",
+        process.env.WORKSPACE_PREVIEW_URL.trim(),
+      ),
+    );
+  }
+
+  if (process.env.WORKSPACE_PREVIEW_IMAGE_PATH?.trim()) {
+    const previewPath = path.isAbsolute(process.env.WORKSPACE_PREVIEW_IMAGE_PATH.trim())
+      ? process.env.WORKSPACE_PREVIEW_IMAGE_PATH.trim()
+      : path.join(CURRENT_CWD, process.env.WORKSPACE_PREVIEW_IMAGE_PATH.trim());
+    checks.push(
+      createDoctorCheck(
+        fs.existsSync(previewPath) ? "ok" : "warn",
+        "Preview image path",
+        fs.existsSync(previewPath)
+          ? previewPath
+          : `missing file: ${previewPath}`,
+      ),
+    );
+  }
+
+  printDoctorChecks(checks);
+  db.close();
 }
 
 function assertDefaultEngine() {
@@ -904,7 +1375,7 @@ function createTuiWidgets(screen) {
     left: 2,
     right: 2,
     height: 1,
-    content: "Enter submit | PgUp/PgDn scroll logs | Ctrl+C quit",
+    content: "Enter submit | PgUp/PgDn scroll logs | Ctrl+C / Esc / Ctrl+D quit",
     style: {
       fg: THEME.muted,
       bg: THEME.panelAlt,
@@ -927,11 +1398,12 @@ function buildSummaryText(workspace) {
   const engineText = workspace ? workspace.engine : DEFAULT_ENGINE;
   const pathText = workspace ? workspace.path : "No active workspace";
   const heartbeat = workspace ? formatTimestamp(workspace.last_heartbeat_at) : "-";
+  const previewText = workspace ? formatPreviewProfile(workspace) : "none";
 
   return [
     `workspace  ${workspaceText}   |   engine  ${engineText}   |   status  ${statusText}`,
     pathText,
-    `cwd: ${CURRENT_CWD}   |   heartbeat: ${heartbeat}`,
+    `cwd: ${CURRENT_CWD}   |   heartbeat: ${heartbeat}   |   preview: ${previewText}`,
   ].join("\n");
 }
 
@@ -943,9 +1415,11 @@ function buildHelpText() {
   lines.push("");
   lines.push("tips");
   lines.push("engine gemini / engine codex switches the active engine");
+  lines.push("preview url http://localhost:3000 sets web screenshots");
+  lines.push("preview image ./export.png or preview pencil ./export.png sets explicit preview policy");
   lines.push("status / where append details to the log panel");
   lines.push("run / edit create background jobs immediately");
-  lines.push("telegram examples: /where /engine codex /run ... /edit ... /screenshot job_xxx");
+  lines.push("telegram examples: /where /engine codex /run ... /edit ... /job last /tail last /screenshot last");
   lines.push("run `veremote daemon` in another terminal to receive telegram commands");
   lines.push("the prompt stays pinned to the bottom");
 
@@ -1026,8 +1500,46 @@ function formatWhereLog(workspace) {
   return [
     `Workspace: ${workspace ? workspace.path : "-"}`,
     `Engine: ${workspace ? workspace.engine : DEFAULT_ENGINE}`,
+    `Preview: ${workspace ? formatPreviewProfile(workspace) : "none"}`,
     `Current cwd: ${CURRENT_CWD}`,
   ];
+}
+
+function parsePreviewCommandInput(rawInput) {
+  const trimmed = String(rawInput || "").trim();
+
+  if (!trimmed) {
+    return {
+      action: "show",
+      type: null,
+      target: null,
+    };
+  }
+
+  const [rawType, ...rest] = trimmed.split(/\s+/);
+  const normalizedType = normalizePreviewType(rawType);
+
+  if (!normalizedType && rawType !== "clear" && rawType !== "none") {
+    return {
+      action: "invalid",
+      type: rawType,
+      target: rest.join(" ").trim(),
+    };
+  }
+
+  if (!normalizedType) {
+    return {
+      action: "clear",
+      type: null,
+      target: null,
+    };
+  }
+
+  return {
+    action: "set",
+    type: normalizedType,
+    target: rest.join(" ").trim(),
+  };
 }
 
 function startFullScreenTui(db) {
@@ -1206,6 +1718,36 @@ function startFullScreenTui(db) {
       return;
     }
 
+    if (command === "preview") {
+      const parsed = parsePreviewCommandInput(prompt);
+
+      if (parsed.action === "show") {
+        const workspace = touchWorkspace(db);
+        appendSystem(`Current preview: ${workspace ? formatPreviewProfile(workspace) : "none"}`);
+        refreshSummary();
+        return;
+      }
+
+      if (parsed.action === "invalid") {
+        appendSystem(`Unsupported preview type: ${parsed.type}`);
+        appendSystem("Usage: preview url <target> | preview image <target> | preview pencil <target> | preview clear");
+        refreshSummary();
+        return;
+      }
+
+      const result = setWorkspacePreview(db, parsed.type, parsed.target);
+
+      if (!result.ok) {
+        appendSystem(result.error);
+        refreshSummary();
+        return;
+      }
+
+      appendSystem(`preview set to ${formatPreviewProfile(result.workspace)}`);
+      refreshSummary();
+      return;
+    }
+
     if (command === "where") {
       appendSystem(formatWhereLog(touchWorkspace(db)));
       refreshSummary();
@@ -1223,7 +1765,7 @@ function startFullScreenTui(db) {
       return;
     }
 
-    if (command === "exit") {
+    if (command === "exit" || command === "quit" || command === ":q" || command === "q") {
       cleanup();
       return;
     }
@@ -1264,7 +1806,8 @@ function startFullScreenTui(db) {
   }
 
   appendSystem("Type `help` for commands. The prompt stays pinned to the bottom.");
-  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘, /screenshot job_xxx");
+  appendSystem("Telegram examples: /where, /engine codex, /run 이 프로젝트를 한 줄로 요약해줘, /edit Header.tsx의 타이틀을 더 크게 수정해줘, /job last, /tail last, /screenshot last");
+  appendSystem("Local preview examples: preview url http://localhost:3000 | preview image ./export.png | preview pencil ./export.png | preview clear");
   appendSystem("Telegram command listener is kept in sync automatically while veremote is open.");
 
   const intervalId = setInterval(pollWatchers, 1000);
@@ -1279,7 +1822,11 @@ function startFullScreenTui(db) {
 
   widgets.input.focus();
 
-  screen.key(["C-c"], cleanup);
+  const exitKeys = ["C-c", "escape", "C-d"];
+  screen.key(exitKeys, cleanup);
+  widgets.input.key(exitKeys, cleanup);
+  widgets.conversation.key(exitKeys, cleanup);
+  widgets.help.key(exitKeys, cleanup);
   screen.key(["pageup"], () => {
     widgets.conversation.scroll(-8);
     screen.render();
@@ -1297,9 +1844,19 @@ function startFullScreenTui(db) {
 }
 
 async function runCommandMode(command) {
-  const db = ensureDb();
-
   printHeader();
+
+  if (command === "init") {
+    runInitCommand();
+    return;
+  }
+
+  if (command === "doctor") {
+    runDoctorCommand();
+    return;
+  }
+
+  const db = ensureDb();
 
   if (command === "connect") {
     const result = connectWorkspace(db);
@@ -1359,6 +1916,39 @@ async function runCommandMode(command) {
     return;
   }
 
+  if (command === "preview") {
+    const parsed = parsePreviewCommandInput(process.argv.slice(3).join(" "));
+
+    if (parsed.action === "show") {
+      const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
+      printMessage(`Current preview: ${workspace ? formatPreviewProfile(workspace) : "none"}`);
+      printStatus(workspace);
+      db.close();
+      return;
+    }
+
+    if (parsed.action === "invalid") {
+      db.close();
+      console.error(`Unsupported preview type: ${parsed.type}`);
+      console.log("Usage: veremote preview <url|image|pencil> <target>");
+      console.log("       veremote preview <clear|none>");
+      process.exit(1);
+    }
+
+    const result = setWorkspacePreview(db, parsed.type, parsed.target);
+
+    if (!result.ok) {
+      db.close();
+      console.error(result.error);
+      process.exit(1);
+    }
+
+    printMessage(`Preview profile changed to ${formatPreviewProfile(result.workspace)}.`);
+    printStatus(result.workspace);
+    db.close();
+    return;
+  }
+
   if (command === "status") {
     const workspace = getActiveWorkspace(db) ? touchWorkspace(db) : null;
     printMessage(
@@ -1402,7 +1992,8 @@ async function runCommandMode(command) {
 
     if (workspace) {
       printStatus(workspace);
-      printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>, /screenshot <job id>");
+      printMessage("Telegram examples: /where, /engine codex, /run <prompt>, /edit <prompt>, /job last, /tail last, /screenshot last");
+      printMessage("Local preview examples: veremote preview url <url> | veremote preview image <path> | veremote preview pencil <path> | veremote preview clear");
     } else {
       printMessage(
         "No active workspace is connected yet. Telegram commands that require a workspace will be rejected until you run `veremote connect`.",
