@@ -92,13 +92,22 @@ hash -r
 
 ## First-Time Setup
 
-Create a starter env file:
+Run the guided setup wizard:
 
 ```bash
 veremote init
 ```
 
-This creates `.env.local` if it does not already exist.
+`veremote init` now asks for the values most beta users need:
+
+- Telegram bot token
+- Telegram chat id
+- Gemini / Codex command selection
+- default preview mode
+- optional public base URL for Telegram detail links
+
+If `gemini` or `codex` is already installed on the machine, the wizard detects that and suggests it automatically.  
+If `veremote init` runs in a non-interactive shell, it falls back to creating a starter `.env.local` template.
 
 Run the built-in checks:
 
@@ -118,7 +127,7 @@ Doctor verifies:
 
 ## `.env.local`
 
-`veremote init` generates this template:
+After the wizard runs, `.env.local` will look roughly like this:
 
 ```env
 TELEGRAM_BOT_TOKEN=
@@ -126,7 +135,7 @@ TELEGRAM_CHAT_ID=
 TELEGRAM_POLLING_ENABLED=true
 TELEGRAM_POLLING_INTERVAL_MS=1000
 
-PUBLIC_BASE_URL=http://localhost:3000
+PUBLIC_BASE_URL=
 WORKSPACE_PREVIEW_URL=http://127.0.0.1:5173
 # WORKSPACE_PREVIEW_IMAGE_PATH=/absolute/path/to/export.png
 # VEREMOTE_ALLOWED_PREVIEW_ROOTS=/absolute/path/to/exports
@@ -140,6 +149,7 @@ Recommended defaults:
 
 - keep `GEMINI_CLI_COMMAND=gemini`
 - add `CODEX_CLI_COMMAND=codex` only if Codex CLI is installed
+- leave `PUBLIC_BASE_URL` blank unless you want clickable detail links in Telegram
 - use `WORKSPACE_PREVIEW_URL` for web work
 - use `veremote preview pencil <path>` for Pencil exports instead of relying on the env file alone
 
